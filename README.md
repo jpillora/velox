@@ -44,6 +44,10 @@ v.onupdate = function() {
 };
 ```
 
+### Example
+
+See [example/](example/) and it running live here: https://velox.jpillora.com (*Note: CloudFlare is in front of this page so it uses SSE instead of WS*).
+
 ### Notes
 
 * JS object properties beginning with `$` will be ignored to play nice with Angular.
