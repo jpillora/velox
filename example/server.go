@@ -57,9 +57,9 @@ func main() {
 	//listen!
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "4000"
+		port = "7070"
 	}
-	log.Printf("Listening on localhost:%s...", port)
+	log.Printf("Listening on :%s...", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
@@ -68,7 +68,7 @@ var indexhtml = []byte(`
 <script src="/velox.js"></script>
 <script>
 	var foo = {};
-	var v = velox("/sync", foo);
+	var v = velox.ws("/sync", foo);
 	v.onupdate = function() {
 		out.innerHTML = JSON.stringify(foo, null, 2);
 	};

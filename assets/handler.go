@@ -1,3 +1,5 @@
+//go:generate go-bindata -pkg assets -o assets.go velox.js json-patch.js event-source.js
+
 package assets
 
 import (
@@ -9,7 +11,10 @@ import (
 )
 
 //embedded JS file
-var veloxJSBytes = MustAsset("velox.js")
+var veloxJSBytes = append(
+	MustAsset("velox.js"),
+	append(MustAsset("json-patch.js"), MustAsset("event-source.js")...)...,
+)
 var veloxJSBytesCompressed []byte
 
 var VeloxJS = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {

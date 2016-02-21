@@ -1,10 +1,10 @@
-//go:generate go-bindata -pkg assets -o assets/assets.go velox.js
-
 package velox
 
 import (
 	"fmt"
+	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -28,14 +28,20 @@ var defaultUpgrader = websocket.Upgrader{
 //or any other request-time checks.
 func SyncHandler(gostruct interface{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		Sync(gostruct, w, r)
+		if conn, err := Sync(gostruct, w, r); err != nil {
+			log.Printf("[velox] %s", err)
+		} else {
+			log.Printf("connect")
+			conn.Wait()
+			log.Printf("disconnect")
+		}
 	})
 }
 
 //Sync upgrades a given HTTP connection into a WebSocket connection and synchronises
 //the provided struct with the client. velox takes responsibility for writing the response
 //in the event of failure.
-func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (*Conn, error) {
+func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, error) {
 	//access gostruct.State via interfaces:
 	gosyncable, ok := gostruct.(interface {
 		sync(gostruct interface{}) (*State, error)
@@ -48,45 +54,35 @@ func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (*Conn, 
 	if err != nil {
 		return nil, fmt.Errorf("cannot sync: %s", err)
 	}
-	//upgrade to websocket
-	wsconn, err := defaultUpgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return nil, fmt.Errorf("cannot upgrade connection: %s", err)
-	}
-	//first message is the handshake
-	handshake := struct {
-		Protocol string
-		Version  int64
-	}{}
-	if err := wsconn.ReadJSON(&handshake); err != nil {
-		wsconn.WriteMessage(websocket.TextMessage, []byte("Invalid handshake message"))
-		wsconn.Close()
-		return nil, fmt.Errorf("handshake failed: %s", err)
-	}
-	if handshake.Protocol != proto {
-		wsconn.WriteMessage(websocket.TextMessage, []byte("Invalid protocol version"))
-		wsconn.Close()
+	if r.URL.Query().Get("p") != proto {
 		return nil, fmt.Errorf("protocol version mismatch")
 	}
-	//ready
-	conn := &Conn{
-		ID:        wsconn.RemoteAddr().String(),
-		Connected: true,
-		uptime:    time.Now(),
-		conn:      wsconn,
-		version:   handshake.Version,
+	version := int64(0)
+	if v, err := strconv.ParseInt(r.URL.Query().Get("v"), 10, 64); err == nil {
+		version = v
 	}
-	//discard all future messages and mark disconnected
-	conn.connected.Add(1)
+	//ready
+	conn := &conn{
+		id:        r.RemoteAddr,
+		connected: true,
+		uptime:    time.Now(),
+		version:   version,
+	}
+	if r.Header.Get("Accept") == "text/event-stream" {
+		log.Printf("event stream transport")
+		conn.transport = &evtSrcTrans{}
+	} else {
+		log.Printf("websockets transport")
+		conn.transport = &wsTrans{}
+	}
+	//connect to client over set transport
+	conn.waiter.Add(1)
 	go func() {
-		for {
-			//msgType, msgBytes, err
-			if _, _, err := wsconn.ReadMessage(); err != nil {
-				break
-			}
+		if err = conn.transport.connect(w, r); err != nil {
+			log.Printf("connection error: %s", err)
 		}
-		conn.Connected = false
-		conn.connected.Done()
+		conn.connected = false
+		conn.waiter.Done()
 	}()
 	//hand over to state to keep in sync
 	state.subscribe(conn)

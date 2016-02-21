@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"sync"
 	"time"
 
@@ -28,7 +29,7 @@ type State struct {
 	bytes    []byte
 	version  int64
 	connMut  sync.Mutex
-	conns    map[string]*Conn
+	conns    map[string]*conn
 	push     struct {
 		mut    sync.Mutex
 		ing    bool
@@ -50,7 +51,7 @@ func (s *State) init(gostruct interface{}) error {
 	}
 	s.gostruct = gostruct
 	s.version = 1
-	s.conns = map[string]*Conn{}
+	s.conns = map[string]*conn{}
 	s.initd = true
 	return nil
 }
@@ -68,16 +69,16 @@ func (s *State) sync(gostruct interface{}) (*State, error) {
 	return s, nil
 }
 
-func (s *State) subscribe(conn *Conn) {
+func (s *State) subscribe(conn *conn) {
 	//subscribe
 	s.connMut.Lock()
-	s.conns[conn.ID] = conn
+	s.conns[conn.id] = conn
 	s.connMut.Unlock()
 	//and then unsubscribe on close
 	go func() {
 		conn.Wait()
 		s.connMut.Lock()
-		s.conns[conn.ID] = conn
+		s.conns[conn.id] = conn
 		s.connMut.Unlock()
 	}()
 }
@@ -134,18 +135,18 @@ func (s *State) gopush() {
 	s.connMut.Lock()
 	for _, c := range s.conns {
 		s.push.wg.Add(1)
-		go func(c *Conn) {
+		go func(c *conn) {
 			update := &update{Version: s.version}
 			//choose optimal update (send the smallest)
 			if c.version == prev && len(s.bytes) > 0 && len(delta) < len(s.bytes) {
 				update.Delta = true
-				update.Data = delta
+				update.Body = delta
 			} else {
 				update.Delta = false
-				update.Data = newBytes
+				update.Body = newBytes
 			}
 			//send update
-			if err := c.conn.WriteJSON(update); err == nil {
+			if err := c.send(update); err == nil {
 				c.version = s.version //sent! mark this version
 			}
 			//pushed!
@@ -161,7 +162,15 @@ func (s *State) gopush() {
 
 //A single update. Maybe contain compression flags in future.
 type update struct {
-	Delta   bool  `json:",omitempty"`
-	Version int64 //53 usable bits
-	Data    json.RawMessage
+	Delta   bool            `json:"delta,omitempty"`
+	Version int64           `json:"version"` //53 usable bits
+	Body    json.RawMessage `json:"body"`
+}
+
+//implement event interface
+func (u *update) Id() string    { return strconv.FormatInt(u.Version, 10) }
+func (u *update) Event() string { return "" }
+func (u *update) Data() string {
+	b, _ := json.Marshal(u)
+	return string(b)
 }

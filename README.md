@@ -38,7 +38,7 @@ Client
 ``` js
 // load script /velox.js
 var foo = {};
-var v = velox("/sync", foo);
+var v = velox.ws("/sync", foo);
 v.onupdate = function() {
 	//foo.A === 42 and foo.B === 21
 };
