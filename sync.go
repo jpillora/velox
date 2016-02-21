@@ -23,6 +23,9 @@ var defaultUpgrader = websocket.Upgrader{
 	},
 }
 
+//SyncHandler is a small wrapper around Sync which simply synchronises
+//all incoming connections. Use Sync if you wish to implement user authentication
+//or any other request-time checks.
 func SyncHandler(gostruct interface{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, err := Sync(gostruct, w, r); err != nil {
@@ -31,6 +34,8 @@ func SyncHandler(gostruct interface{}) http.Handler {
 	})
 }
 
+//Sync upgrades a given HTTP connection into a WebSocket connection and synchronises
+//the provided struct with the client.
 func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (*Conn, error) {
 	//access gostruct.State via interfaces:
 	gosyncable, ok := gostruct.(interface {
@@ -81,6 +86,7 @@ func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (*Conn, 
 				break
 			}
 		}
+		conn.Connected = false
 		conn.connected.Done()
 	}()
 	//hand over to state to keep in sync

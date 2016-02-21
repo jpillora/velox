@@ -159,13 +159,9 @@ func (s *State) gopush() {
 	s.bytes = newBytes
 }
 
+//A single update. Maybe contain compression flags in future.
 type update struct {
 	Delta   bool  `json:",omitempty"`
 	Version int64 //53 usable bits
 	Data    json.RawMessage
 }
-
-// type jsonBytes []byte
-// func (j jsonBytes) MarshalJSON() ([]byte, error) {
-// 	return []byte(j), nil
-// }
