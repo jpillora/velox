@@ -57,7 +57,9 @@ See [example/](example/) and it running live here: https://velox.jpillora.com (*
 	```go
 	func SyncHandler(gostruct interface{}) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			velox.Sync(gostruct, w, r)
+			if conn, err := Sync(gostruct, w, r); err == nil {
+				conn.Wait()
+			}
 		})
 	}
 	```
@@ -66,16 +68,16 @@ See [example/](example/) and it running live here: https://velox.jpillora.com (*
 
 * Object synchronization is currently one way (server to client) only.
 * Object diff has not been optimized. It is a simple property-by-property comparison.
-* No IE 8 or 9 support
 
+<!--
 ### Improvements
 
-* Switch to SSE with long-polling fallback (currently works with WebSockets)
 * Use deflate in [the client](https://github.com/dankogai/js-deflate) and on [the server](https://golang.org/pkg/compress/flate/) for more byte savings.
+-->
 
 #### MIT License
 
-Copyright © 2015 Jaime Pillora &lt;dev@jpillora.com&gt;
+Copyright © 2016 Jaime Pillora &lt;dev@jpillora.com&gt;
 
 Permission is hereby granted, free of charge, to any person obtaining
 a copy of this software and associated documentation files (the

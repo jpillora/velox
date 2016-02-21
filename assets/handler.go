@@ -13,7 +13,10 @@ import (
 //embedded JS file
 var veloxJSBytes = append(
 	MustAsset("velox.js"),
-	append(MustAsset("json-patch.js"), MustAsset("event-source.js")...)...,
+	append(
+		MustAsset("json-patch.js"),
+		MustAsset("event-source.js")...,
+	)...,
 )
 var veloxJSBytesCompressed []byte
 
