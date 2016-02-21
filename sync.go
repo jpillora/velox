@@ -1,20 +1,19 @@
-//go:generate go-bindata -pkg velox -o assets.go velox.js
+//go:generate go-bindata -pkg assets -o assets/assets.go velox.js
 
 package velox
 
 import (
-	"bytes"
-	"compress/gzip"
 	"fmt"
 	"net/http"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jpillora/velox/assets"
 )
 
 const proto = "v2"
+
+var JS = assets.VeloxJS
 
 var defaultUpgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
@@ -34,7 +33,9 @@ func SyncHandler(gostruct interface{}) http.Handler {
 
 func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (*Conn, error) {
 	//access gostruct.State via interfaces:
-	gosyncable, ok := gostruct.(syncable)
+	gosyncable, ok := gostruct.(interface {
+		sync(gostruct interface{}) (*State, error)
+	})
 	if !ok {
 		return nil, fmt.Errorf("cannot sync: does not embed velox.State")
 	}
@@ -86,36 +87,4 @@ func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (*Conn, 
 	state.subscribe(conn)
 	//pass connection to user
 	return conn, nil
-}
-
-type syncable interface {
-	sync(gostruct interface{}) (*State, error)
-}
-
-//embedded JS file
-var JSBytes = _veloxJs
-var JSBytesDecompressed []byte
-
-type jsServe struct{}
-
-var JS *jsServe
-
-func (j *jsServe) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	b := JSBytes
-	//lazy decompression
-	if !strings.Contains(req.Header.Get("Accept-Encoding"), "gzip") {
-		if JSBytesDecompressed == nil {
-			buff := bytes.Buffer{}
-			g := gzip.NewWriter(&buff)
-			g.Write(JSBytes)
-			g.Close()
-			JSBytesDecompressed = buff.Bytes()
-		}
-		b = JSBytesDecompressed
-	} else {
-		w.Header().Set("Content-Encoding", "gzip")
-	}
-	w.Header().Set("Content-Type", "text/javascript")
-	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
-	w.Write(b)
 }

@@ -42,7 +42,6 @@ func main() {
 			}
 			//push to observers
 			foo.Push()
-			log.Printf("push")
 			//do other stuff...
 			time.Sleep(250 * time.Millisecond)
 		}
@@ -55,7 +54,7 @@ func main() {
 		w.Header().Set("Content-Type", "text/html")
 		w.Write(indexhtml)
 	})
-
+	//listen!
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "4000"
