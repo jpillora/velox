@@ -2,13 +2,14 @@
 
 [![GoDoc](https://godoc.org/github.com/jpillora/velox?status.svg)](https://godoc.org/github.com/jpillora/velox)
 
-Real-time Go struct to JS object synchronisation over WebSockets
+Real-time Go struct to JS object synchronisation over SSE and WebSockets
 
 :warning: *This is beta software. Do not use this in production yet. Consider the API unstable. Please report any [issues](https://github.com/jpillora/velox) you encounter.*
 
 ### Features
 
 * Simple API
+* Supports [Server-Sent Events (EventSource)](https://en.wikipedia.org/wiki/Server-sent_events) and [WebSockets](https://en.wikipedia.org/wiki/WebSocket)
 * Sync any JSON marshallable struct
 * Delta updates using [JSONPatch (RFC6902)](https://tools.ietf.org/html/rfc6902)
 
@@ -38,7 +39,7 @@ Client
 ``` js
 // load script /velox.js
 var foo = {};
-var v = velox.ws("/sync", foo);
+var v = velox.sse("/sync", foo); //velox.sse() or velox.ws()
 v.onupdate = function() {
 	//foo.A === 42 and foo.B === 21
 };
@@ -46,7 +47,9 @@ v.onupdate = function() {
 
 ### Example
 
-See [example/](example/) and it running live here: https://velox.jpillora.com (*Note: CloudFlare is in front of this page so it uses SSE instead of WS*).
+See this [simple `example/`](example/) and view it running live here https://velox.jpillora.com.
+
+*Note: CloudFlare is in front of this page so it uses [SSE](https://en.wikipedia.org/wiki/Server-sent_events) instead of [WS](https://en.wikipedia.org/wiki/WebSocket)*
 
 ### Notes
 
@@ -68,6 +71,7 @@ See [example/](example/) and it running live here: https://velox.jpillora.com (*
 
 * Object synchronization is currently one way (server to client) only.
 * Object diff has not been optimized. It is a simple property-by-property comparison.
+	* A real performance test has not been done yet.
 
 <!--
 ### Improvements
