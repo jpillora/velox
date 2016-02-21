@@ -2,6 +2,7 @@ package velox
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -53,21 +54,29 @@ func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, e
 		version:   version,
 	}
 	if r.Header.Get("Accept") == "text/event-stream" {
+		log.Println("event source")
 		conn.transport = &evtSrcTrans{}
 	} else {
+		log.Println("websocket")
 		conn.transport = &wsTrans{}
 	}
 	//connect to client over set transport
 	conn.waiter.Add(1)
+	isConnected := make(chan bool)
 	go func() {
+		log.Println("connect")
 		//connect and block
-		if err = conn.transport.connect(w, r); err != nil {
-			//TODO(jpillora): log nicely. log.Printf("connection error: %s", err)
+		if err = conn.transport.connect(w, r, isConnected); err != nil {
+			//TODO(jpillora): log nicely
+			log.Printf("connection error: %s", err)
 		}
+		log.Println("disconnect")
 		//disconnected, done waiting
 		conn.connected = false
 		conn.waiter.Done()
 	}()
+	<-isConnected
+	log.Println("subscribe")
 	//hand over to state to keep in sync
 	state.subscribe(conn)
 	//pass connection to user

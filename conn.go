@@ -21,7 +21,7 @@ type Conn interface {
 }
 
 type transport interface {
-	connect(w http.ResponseWriter, r *http.Request) error
+	connect(w http.ResponseWriter, r *http.Request, isConnected chan bool) error
 	send(upd *update) error
 }
 
@@ -61,12 +61,13 @@ type wsTrans struct {
 	conn *websocket.Conn
 }
 
-func (ws *wsTrans) connect(w http.ResponseWriter, r *http.Request) error {
+func (ws *wsTrans) connect(w http.ResponseWriter, r *http.Request, isConnected chan bool) error {
 	conn, err := defaultUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return fmt.Errorf("cannot upgrade connection: %s", err)
 	}
 	ws.conn = conn
+	isConnected <- true
 	for {
 		//msgType, msgBytes, err
 		if _, _, err := conn.ReadMessage(); err != nil {
@@ -89,9 +90,10 @@ type evtSrcTrans struct {
 	s *eventsource.Server
 }
 
-func (es *evtSrcTrans) connect(w http.ResponseWriter, r *http.Request) error {
+func (es *evtSrcTrans) connect(w http.ResponseWriter, r *http.Request, isConnected chan bool) error {
 	es.s = eventsource.NewServer()
 	es.s.Gzip = true
+	isConnected <- true
 	es.s.Handler("events").ServeHTTP(w, r)
 	return nil
 }
