@@ -2,12 +2,10 @@ package velox
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/jpillora/velox/assets"
 )
 
@@ -15,26 +13,12 @@ const proto = "v2"
 
 var JS = assets.VeloxJS
 
-var defaultUpgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
-}
-
 //SyncHandler is a small wrapper around Sync which simply synchronises
 //all incoming connections. Use Sync if you wish to implement user authentication
 //or any other request-time checks.
 func SyncHandler(gostruct interface{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if conn, err := Sync(gostruct, w, r); err != nil {
-			log.Printf("[velox] %s", err)
-		} else {
-			log.Printf("connect")
-			conn.Wait()
-			log.Printf("disconnect")
-		}
+		Sync(gostruct, w, r)
 	})
 }
 
@@ -69,18 +53,18 @@ func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, e
 		version:   version,
 	}
 	if r.Header.Get("Accept") == "text/event-stream" {
-		log.Printf("event stream transport")
 		conn.transport = &evtSrcTrans{}
 	} else {
-		log.Printf("websockets transport")
 		conn.transport = &wsTrans{}
 	}
 	//connect to client over set transport
 	conn.waiter.Add(1)
 	go func() {
+		//connect and block
 		if err = conn.transport.connect(w, r); err != nil {
-			log.Printf("connection error: %s", err)
+			//TODO(jpillora): log nicely. log.Printf("connection error: %s", err)
 		}
+		//disconnected, done waiting
 		conn.connected = false
 		conn.waiter.Done()
 	}()
