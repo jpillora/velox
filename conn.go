@@ -11,18 +11,19 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-//Conn represents a single websocket connection
-//being synchronised. Its ID is the the connections remote
-//address.
+//Conn represents a single live connection being synchronised.
+//Its ID is the the connection's remote address.
 type Conn interface {
 	ID() string
 	Connected() bool
 	Wait()
+	Close() error
 }
 
 type transport interface {
 	connect(w http.ResponseWriter, r *http.Request, isConnected chan bool) error
 	send(upd *update) error
+	close() error
 }
 
 type conn struct {
@@ -45,6 +46,11 @@ func (c *conn) Connected() bool {
 //Wait will block until the connection is closed.
 func (c *conn) Wait() {
 	c.waiter.Wait()
+}
+
+//Force close the connection.
+func (c *conn) Close() error {
+	return c.transport.close()
 }
 
 //=========================
@@ -84,6 +90,10 @@ func (ws *wsTrans) send(upd *update) error {
 	return ws.conn.WriteJSON(upd)
 }
 
+func (ws *wsTrans) close() error {
+	return ws.conn.Close()
+}
+
 //=========================
 
 type evtSrcTrans struct {
@@ -100,5 +110,10 @@ func (es *evtSrcTrans) connect(w http.ResponseWriter, r *http.Request, isConnect
 
 func (es *evtSrcTrans) send(upd *update) error {
 	es.s.Publish([]string{"events"}, upd)
+	return nil
+}
+
+func (es *evtSrcTrans) close() error {
+	es.s.Close()
 	return nil
 }
