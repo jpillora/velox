@@ -106,7 +106,7 @@ var EventSource = function (url) {
       xhr.send();
 
       setTimeout(function () {
-        if (true || xhr.readyState == 3) xhr.abort();
+        xhr.abort();
       }, xhr.timeout);
 
       eventsource._xhr = xhr;

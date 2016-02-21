@@ -1,6 +1,4 @@
 /* global window,WebSocket */
-// velox - v0.1.0 - https://github.com/jpillora/velox
-// Jaime Pillora <dev@jpillora.com> - MIT Copyright 2015
 (function(window, document) {
   if(!window.WebSocket)
     return alert("This browser does not support WebSockets");
@@ -46,10 +44,9 @@
   //global status change handler
   function onstatus(event) {
     velox.online = navigator.onLine;
-    for(var i = 0; i < rts.length; i++) {
-      if(velox.online && rts[i].autoretry)
-        rts[i].retry();
-    }
+    for(var i = 0; i < vs.length; i++)
+      if(velox.online && vs[i].autoretry)
+        vs[i].retry();
   }
   window.addEventListener('online',  onstatus);
   window.addEventListener('offline', onstatus);

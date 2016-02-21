@@ -9,9 +9,10 @@ Real-time Go struct to JS object synchronisation over SSE and WebSockets
 ### Features
 
 * Simple API
-* Supports [Server-Sent Events (EventSource)](https://en.wikipedia.org/wiki/Server-sent_events) and [WebSockets](https://en.wikipedia.org/wiki/WebSocket)
-* Sync any JSON marshallable struct
+* Synchronise any JSON marshallable struct
 * Delta updates using [JSONPatch (RFC6902)](https://tools.ietf.org/html/rfc6902)
+* Supports [Server-Sent Events (EventSource)](https://en.wikipedia.org/wiki/Server-sent_events) and [WebSockets](https://en.wikipedia.org/wiki/WebSocket)
+* [Server-Sent Events (EventSource)](https://en.wikipedia.org/wiki/Server-sent_events) client-side poly-fill to fallback to long-polling in older browsers.
 
 ### Quick Usage
 
@@ -24,8 +25,9 @@ type Foo struct {
 	A, B int
 }
 foo := &Foo{}
-//serve velox.js client library and sync endpoint
+//serve velox.js client library (assets/dist/velox.min.js)
 http.Handle("/velox.js", velox.JS)
+//serve velox sync endpoint for foo
 http.Handle("/sync", velox.SyncHandler(foo))
 //make changes
 foo.A = 42
@@ -39,7 +41,7 @@ Client
 ``` js
 // load script /velox.js
 var foo = {};
-var v = velox.sse("/sync", foo); //velox.sse() or velox.ws()
+var v = velox.sse("/sync", foo); //choose either: velox.sse() or velox.ws()
 v.onupdate = function() {
 	//foo.A === 42 and foo.B === 21
 };
@@ -71,7 +73,7 @@ See this [simple `example/`](example/) and view it running live here https://vel
 
 * Object synchronization is currently one way (server to client) only.
 * Object diff has not been optimized. It is a simple property-by-property comparison.
-	* A real performance test has not been done yet.
+	* :warning: a proper performance test has not been done yet.
 
 <!--
 ### Improvements
