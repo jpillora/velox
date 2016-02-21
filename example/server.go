@@ -68,7 +68,7 @@ var indexhtml = []byte(`
 <script src="/velox.js"></script>
 <script>
 	var foo = {};
-	var v = velox.ws("/sync", foo);
+	var v = velox.sse("/sync", foo);
 	v.onupdate = function() {
 		out.innerHTML = JSON.stringify(foo, null, 2);
 	};
