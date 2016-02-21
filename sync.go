@@ -28,14 +28,13 @@ var defaultUpgrader = websocket.Upgrader{
 //or any other request-time checks.
 func SyncHandler(gostruct interface{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, err := Sync(gostruct, w, r); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-		}
+		Sync(gostruct, w, r)
 	})
 }
 
 //Sync upgrades a given HTTP connection into a WebSocket connection and synchronises
-//the provided struct with the client.
+//the provided struct with the client. velox takes responsibility for writing the response
+//in the event of failure.
 func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (*Conn, error) {
 	//access gostruct.State via interfaces:
 	gosyncable, ok := gostruct.(interface {

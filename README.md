@@ -53,9 +53,7 @@ v.onupdate = function() {
 	```go
 	func SyncHandler(gostruct interface{}) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if _, err := velox.Sync(gostruct, w, r); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-			}
+			velox.Sync(gostruct, w, r)
 		})
 	}
 	```
