@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -102,7 +103,9 @@ type evtSrcTrans struct {
 
 func (es *evtSrcTrans) connect(w http.ResponseWriter, r *http.Request, isConnected chan bool) error {
 	es.s = eventsource.NewServer()
-	es.s.Gzip = true
+	if !strings.Contains(w.Header().Get("Content-Encoding"), "gzip") {
+		es.s.Gzip = true
+	}
 	isConnected <- true
 	es.s.Handler("events").ServeHTTP(w, r)
 	return nil

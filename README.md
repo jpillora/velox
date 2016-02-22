@@ -12,7 +12,7 @@ Real-time Go struct to JS object synchronisation over SSE and WebSockets
 * Synchronise any JSON marshallable struct
 * Delta updates using [JSONPatch (RFC6902)](https://tools.ietf.org/html/rfc6902)
 * Supports [Server-Sent Events (EventSource)](https://en.wikipedia.org/wiki/Server-sent_events) and [WebSockets](https://en.wikipedia.org/wiki/WebSocket)
-* [Server-Sent Events (EventSource)](https://en.wikipedia.org/wiki/Server-sent_events) client-side poly-fill to fallback to long-polling in older browsers.
+* SSE [client-side poly-fill](https://github.com/remy/polyfills/blob/master/EventSource.js) to fallback to long-polling in older browsers (IE8+).
 
 ### Quick Usage
 
