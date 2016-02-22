@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"time"
@@ -12,9 +13,8 @@ import (
 type Foo struct {
 	velox.State //adds sync state and an Update() method
 	A, B        int
-	C           []int
-	D           string
-	E           Bar
+	C           map[string]int
+	D           Bar
 }
 
 type Bar struct {
@@ -23,7 +23,7 @@ type Bar struct {
 
 func main() {
 	//state we wish to sync
-	foo := &Foo{A: 21, B: 42, D: "0"}
+	foo := &Foo{A: 21, B: 42, C: map[string]int{}}
 	go func() {
 		i := 0
 		for {
@@ -33,12 +33,16 @@ func main() {
 				foo.B--
 			}
 			i++
-			if i > 10 {
-				foo.C = foo.C[1:]
+			foo.C[string('A'+rand.Intn(26))] = i
+			if i%2 == 0 {
+				for k, _ := range foo.C {
+					delete(foo.C, k)
+					break
+				}
 			}
-			foo.C = append(foo.C, i)
 			if i%5 == 0 {
-				foo.E.Y++
+				foo.D.X--
+				foo.D.Y++
 			}
 			//push to observers
 			foo.Push()
