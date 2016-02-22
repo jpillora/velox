@@ -64,14 +64,31 @@ func main() {
 }
 
 var indexhtml = []byte(`
-<pre id="out"></pre>
+
+<!-- documentation -->
+<pre id="code">
+&lt;pre id="example">&lt;/pre>
+&lt;script src="/velox.js">&lt;/script>
+&lt;script>
+var foo = {};
+var v = velox.sse("/sync", foo);
+v.onupdate = function() {
+	example.innerHTML = JSON.stringify(foo, null, 2);
+};
+&lt;/script>
+</pre>
+<a href="https://github.com/jpillora/velox"><img style="position: absolute; z-index: 2; top: 0; right: 0; border: 0;" src="https://s3.amazonaws.com/github/ribbons/forkme_right_darkblue_121621.png" alt="Fork me on GitHub"></a>
+<hr>
+
+<!-- example -->
+<pre id="example"></pre>
 <script src="/velox.js"></script>
 <script>
-	var foo = {};
-	var v = velox.sse("/sync", foo);
-	v.onupdate = function() {
-		out.innerHTML = JSON.stringify(foo, null, 2);
-	};
+var foo = {};
+var v = velox.sse("/sync", foo);
+v.onupdate = function() {
+	example.innerHTML = JSON.stringify(foo, null, 2);
+};
 </script>
 `)
 
