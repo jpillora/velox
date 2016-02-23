@@ -33,7 +33,7 @@ http.Handle("/sync", velox.SyncHandler(foo))
 foo.A = 42
 foo.B = 21
 //push to client
-foo.Update()
+foo.Push()
 ```
 
 Client
