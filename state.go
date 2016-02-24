@@ -162,9 +162,10 @@ func (s *State) gopush() {
 
 //A single update. Maybe contain compression flags in future.
 type update struct {
+	Ping    bool            `json:"ping,omitempty"`
 	Delta   bool            `json:"delta,omitempty"`
-	Version int64           `json:"version"` //53 usable bits
-	Body    json.RawMessage `json:"body"`
+	Version int64           `json:"version,omitempty"` //53 usable bits
+	Body    json.RawMessage `json:"body,omitempty"`
 }
 
 //implement event interface

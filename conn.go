@@ -75,6 +75,7 @@ func (ws *wsTrans) connect(w http.ResponseWriter, r *http.Request, isConnected c
 	}
 	ws.conn = conn
 	isConnected <- true
+	//block on connection
 	for {
 		//msgType, msgBytes, err
 		if _, _, err := conn.ReadMessage(); err != nil {

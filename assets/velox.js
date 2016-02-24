@@ -104,7 +104,7 @@
       events.forEach(function(e) {
         _this.conn["on"+e] = _this["conn"+e].bind(_this);
       });
-      this.ping.t = setInterval(this.ping.bind(this), 30 * 1000);
+      this.pingout.t = setInterval(this.pingout.bind(this), 30 * 1000);
     },
     disconnect: function() {
       this.autoretry = false;
@@ -123,25 +123,32 @@
         this.conn.close();
       }
       this.conn = null;
-      clearTimeout(this.ping.t);
+      clearTimeout(this.pingout.t);
     },
     send: function(data) {
       if(this.conn && this.conn instanceof WebSocket && this.conn.readyState === WebSocket.OPEN) {
         return this.conn.send(data);
       }
     },
-    ping: function() {
+    pingout: function() {
       this.send("ping");
     },
+    pingin: function() {
+      //ping receievd by server, reset last timer, start death timer for 30secs
+      clearTimeout(this.pingin.t);
+      this.pingin.t = setTimeout(this.retry.bind(this), 30 * 1000);
+    },
     connmessage: function(event) {
-      var str = event.data;
-      if (str === "ping") return;
       var update;
       try {
-        update = JSON.parse(str);
+        update = JSON.parse(event.data);
       } catch(err) {
         this.onerror(err);
         return;
+      }
+      if(update.ping) {
+        this.pingin();
+        return
       }
       if(!update.body || !this.obj) {
         this.onerror("null objects");
@@ -163,6 +170,7 @@
     },
     connopen: function() {
       this.connected = true;
+      this.pingin(); //treat initial connection as ping
     },
     connclose: function() {
       this.connected = false;

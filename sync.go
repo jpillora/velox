@@ -63,6 +63,13 @@ func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, e
 	conn.waiter.Add(1)
 	isConnected := make(chan bool)
 	go func() {
+		//ping loop (every 25s, browser timesout after 30s)
+		go func() {
+			for conn.connected {
+				time.Sleep(25 * time.Second)
+				conn.transport.send(&update{Ping: true})
+			}
+		}()
 		//connect and block
 		if err = conn.transport.connect(w, r, isConnected); err != nil {
 			//TODO(jpillora): log nicely
