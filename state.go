@@ -78,7 +78,7 @@ func (s *State) subscribe(conn *conn) {
 	go func() {
 		conn.Wait()
 		s.connMut.Lock()
-		s.conns[conn.id] = conn
+		delete(s.conns, conn.id)
 		s.connMut.Unlock()
 	}()
 }
