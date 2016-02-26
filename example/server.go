@@ -11,10 +11,11 @@ import (
 )
 
 type Foo struct {
-	velox.State //adds sync state and an Update() method
-	A, B        int
-	C           map[string]int
-	D           Bar
+	velox.State    //adds sync state and an Update() method
+	NumConnections int
+	A, B           int
+	C              map[string]int
+	D              Bar
 }
 
 type Bar struct {
@@ -35,15 +36,22 @@ func main() {
 			i++
 			foo.C[string('A'+rand.Intn(26))] = i
 			if i%2 == 0 {
+				j := 0
+				rmj := rand.Intn(len(foo.C))
 				for k, _ := range foo.C {
-					delete(foo.C, k)
-					break
+					if j == rmj {
+						delete(foo.C, k)
+						break
+					}
+					j++
 				}
 			}
 			if i%5 == 0 {
 				foo.D.X--
 				foo.D.Y++
 			}
+			//show number of connections 'foo' is currently handling
+			foo.NumConnections = foo.State.NumConnections()
 			//push to observers
 			foo.Push()
 			//do other stuff...

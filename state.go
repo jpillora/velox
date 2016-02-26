@@ -83,6 +83,13 @@ func (s *State) subscribe(conn *conn) {
 	}()
 }
 
+func (s *State) NumConnections() int {
+	s.connMut.Lock()
+	n := len(s.conns)
+	s.connMut.Unlock()
+	return n
+}
+
 //Send the changes from this object to all connected clients.
 //Push is thread-safe and is throttled so it can be called
 //with abandon.
@@ -168,7 +175,7 @@ type update struct {
 	Body    json.RawMessage `json:"body,omitempty"`
 }
 
-//implement event interface
+//implement eventsource.Event interface
 func (u *update) Id() string    { return strconv.FormatInt(u.Version, 10) }
 func (u *update) Event() string { return "" }
 func (u *update) Data() string {
