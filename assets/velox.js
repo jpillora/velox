@@ -1,7 +1,5 @@
 /* global window,WebSocket */
 (function(window, document) {
-  if(!window.WebSocket)
-    return alert("This browser does not support WebSockets");
   //velox protocol version
   var proto = "v2";
   var vs = [];
@@ -21,8 +19,7 @@
   };
   velox.proto = proto;
   velox.online = true;
-  //special merge - ignore $properties
-  // x <- y
+  //recursive merge (x <- y) - ignore $properties
   var merge = function(x, y) {
     if (!x || typeof x !== "object" || !y || typeof y !== "object")
       return y;
@@ -37,6 +34,7 @@
         if (k[0] !== "$" && !(k in y))
           delete x[k];
     }
+    //iterate over either elements/properties
     for (k in y)
       x[k] = merge(x[k], y[k]);
     return x;
@@ -58,6 +56,8 @@
   function Velox(type, url, obj) {
     switch(type) {
     case velox.WS:
+      if(!window.WebSocket)
+        throw "This browser does not support WebSockets";
       this.ws = true; break;
     case velox.SSE:
       this.sse = true; break;
@@ -80,6 +80,8 @@
     this.version = 0;
     this.onupdate = function() {/*noop*/};
     this.onerror = function() {/*noop*/};
+    this.onconnect = function() {/*noop*/};
+    this.ondisconnect = function() {/*noop*/};
     this.connected = false;
     this.connect();
   }
@@ -110,20 +112,19 @@
       this.autoretry = false;
       this.cleanup();
     },
-    cleanup: function(){
+    cleanup: function() {
+      clearTimeout(this.pingout.t);
       if(!this.conn)
         return;
-      var _this = this;
-      events.forEach(function(e) {
-        _this.conn["on"+e] = null;
-      });
-      if(this.conn &&
-          (this.conn instanceof EventSource && this.conn.readyState !== EventSource.CLOSED) ||
-          (this.conn instanceof WebSocket && this.conn.readyState !== WebSocket.CLOSED)) {
-        this.conn.close();
-      }
+      var conn = this.conn;
       this.conn = null;
-      clearTimeout(this.pingout.t);
+      events.forEach(function(e) {
+        conn["on"+e] = null;
+      });
+      if(conn && (conn instanceof EventSource && conn.readyState !== EventSource.CLOSED) ||
+          (conn instanceof WebSocket && conn.readyState !== WebSocket.CLOSED)) {
+        conn.close();
+      }
     },
     send: function(data) {
       if(this.conn && this.conn instanceof WebSocket && this.conn.readyState === WebSocket.OPEN) {
@@ -162,25 +163,26 @@
       //auto-angular
       if(typeof this.obj.$apply === "function")
         this.obj.$apply();
-      if(typeof this.onupdate === "function")
-        this.onupdate();
+      this.onupdate(this.obj);
       this.version = update.version;
       //successful msg resets retry counter
       this.delay = 100;
     },
     connopen: function() {
       this.connected = true;
+      this.onconnect();
       this.pingin(); //treat initial connection as ping
     },
     connclose: function() {
       this.connected = false;
+      this.ondisconnect();
       this.delay *= 2;
       if(this.autoretry && velox.online) {
         this.retry.t = setTimeout(this.connect.bind(this), this.delay);
       }
     },
     connerror: function(err) {
-      // console.warn(err);
+      this.onerror(err);
     }
   };
   //publicise

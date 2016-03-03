@@ -4,7 +4,7 @@
 
 Real-time Go struct to JS object synchronisation over SSE and WebSockets
 
-:warning: *This is beta software. Do not use this in production yet. Consider the API unstable. Please report any [issues](https://github.com/jpillora/velox) you encounter.*
+:warning: *This is beta software. Be wary of using this in production. Please report any [issues](https://github.com/jpillora/velox/issues) you encounter.*
 
 ### Features
 
@@ -47,11 +47,31 @@ v.onupdate = function() {
 };
 ```
 
+### API
+
+Server API
+
+[![GoDoc](https://godoc.org/github.com/jpillora/velox?status.svg)](https://godoc.org/github.com/jpillora/velox)
+
+Client API
+
+* `velox.sse(url, object)` *function* returns `v` - Creates a new SSE velox connection
+* `velox.ws(url, object)` *function* returns `v` - Creates a new WS velox connection
+* `v.onupdate(object)` *function* - Called when a server push is received
+* `v.onerror(err)` *function* - Called when a connection error occurs
+* `v.onconnect()` *function* - Called when the connection is established
+* `v.ondisconnect()` *function* - Called when the connection is closed
+* `v.connected` *bool* - Denotes whether the connection is currently open
+* `v.ws` *bool* - Denotes whether the connection is in web sockets mode
+* `v.sse` *bool* - Denotes whether the connection is in server-sent events mode
+
 ### Example
 
-See this [simple `example/`](example/) and view it running live here https://velox.jpillora.com.
+See this [simple `example/`](example/) and view it live here: https://velox.jpillora.com
 
-*Note: CloudFlare is in front of this page so it uses [SSE](https://en.wikipedia.org/wiki/Server-sent_events) instead of [WS](https://en.wikipedia.org/wiki/WebSocket)*
+![screen shot 2016-03-03 at 12 41 44 pm](https://cloud.githubusercontent.com/assets/633843/13481947/8eea1804-e13d-11e5-80c8-be9317c54fbc.png)
+
+*Here is a screenshot from this example page, showing the messages arriving as either a full replacement of the object or just a delta. The server will send which ever is smaller.*
 
 ### Notes
 
@@ -72,8 +92,8 @@ See this [simple `example/`](example/) and view it running live here https://vel
 ### Known issues
 
 * Object synchronization is currently one way (server to client) only.
-* Object diff has not been optimized. It is a simple property-by-property comparison.
-	* :warning: a proper performance test has not been done yet.
+* Object diff has not been optimized. It is a simple property-by-property comparison. :warning: Performance testing has not been done yet.
+* The demo page is behind CloudFlare so it must use [SSE](https://en.wikipedia.org/wiki/Server-sent_events), as CloudFlare does not support [WS](https://en.wikipedia.org/wiki/WebSocket) on their free plans.
 
 <!--
 ### Improvements

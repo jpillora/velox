@@ -163,7 +163,7 @@ func (s *State) gopush() {
 	s.connMut.Unlock()
 	//wait for all connection pushes
 	s.push.wg.Wait()
-	//mark new state
+	//mark new state which has been sent out to all
 	s.bytes = newBytes
 }
 
