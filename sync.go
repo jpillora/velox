@@ -80,6 +80,13 @@ func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, e
 		conn.waiter.Done()
 	}()
 	<-isConnected
+	//initial update
+	if state.version != conn.version {
+		conn.transport.send(&update{
+			Body:    state.bytes,
+			Version: state.version,
+		})
+	}
 	//hand over to state to keep in sync
 	state.subscribe(conn)
 	//pass connection to user
