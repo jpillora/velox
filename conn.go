@@ -102,13 +102,36 @@ type evtSrcTrans struct {
 	s *eventsource.Server
 }
 
+//evtSrcWriter is a hack to
+//watch when connection is ready
+type evtSrcWriter struct {
+	isFlushed   bool
+	isConnected chan bool
+	http.ResponseWriter
+}
+
+func (ew *evtSrcWriter) CloseNotify() <-chan bool {
+	return ew.ResponseWriter.(http.CloseNotifier).CloseNotify()
+}
+
+func (ew *evtSrcWriter) Flush() {
+	if !ew.isFlushed {
+		ew.isConnected <- true
+	}
+	ew.isFlushed = true
+	f, ok := ew.ResponseWriter.(http.Flusher)
+	if ok {
+		f.Flush()
+	}
+}
+
 func (es *evtSrcTrans) connect(w http.ResponseWriter, r *http.Request, isConnected chan bool) error {
 	es.s = eventsource.NewServer()
 	if !strings.Contains(w.Header().Get("Content-Encoding"), "gzip") {
 		es.s.Gzip = true
 	}
-	isConnected <- true
-	es.s.Handler("events").ServeHTTP(w, r)
+	ew := &evtSrcWriter{false, isConnected, w}
+	es.s.Handler("events").ServeHTTP(ew, r)
 	return nil
 }
 
