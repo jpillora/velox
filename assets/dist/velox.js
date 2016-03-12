@@ -1,4 +1,4 @@
-// velox - v0.2.2 - https://github.com/jpillora/velox
+// velox - v0.2.3 - https://github.com/jpillora/velox
 // Jaime Pillora <dev@jpillora.com> - MIT Copyright 2016
 (function() {
 ;(function (global) {
@@ -629,12 +629,11 @@ if (typeof exports !== "undefined") {
   function onstatus(event) {
     velox.online = navigator.onLine;
     for(var i = 0; i < vs.length; i++)
-      if(velox.online && vs[i].autoretry)
+      if(velox.online && vs[i].retrying)
         vs[i].retry();
   }
   window.addEventListener('online',  onstatus);
   window.addEventListener('offline', onstatus);
-
   //helpers
   var events = ["message","error","open","close"];
   var loc = window.location;
@@ -673,13 +672,15 @@ if (typeof exports !== "undefined") {
   }
   Velox.prototype = {
     connect: function() {
-      this.autoretry = true;
+      this.retrying = true;
       this.retry();
     },
     retry: function() {
       clearTimeout(this.retry.t);
       if(this.conn)
         this.cleanup();
+      if(!this.retrying)
+        return;
       if(!this.delay)
         this.delay = 100;
       var url = this.url + (/\?/.test(this.url) ? "&" : "?") + "p="+proto+"&v="+this.version
@@ -693,9 +694,10 @@ if (typeof exports !== "undefined") {
         _this.conn["on"+e] = _this["conn"+e].bind(_this);
       });
       this.pingout.t = setInterval(this.pingout.bind(this), 30 * 1000);
+      this.sleepCheck();
     },
     disconnect: function() {
-      this.autoretry = false;
+      this.retrying = false;
       this.cleanup();
     },
     cleanup: function() {
@@ -724,6 +726,16 @@ if (typeof exports !== "undefined") {
       //ping receievd by server, reset last timer, start death timer for 30secs
       clearTimeout(this.pingin.t);
       this.pingin.t = setTimeout(this.retry.bind(this), 30 * 1000);
+    },
+    sleepCheck: function() {
+      var data = this.sleepCheck;
+      clearInterval(data.t);
+      var now = Date.now();
+      //should be ~5secs, over ~30sec - assume woken from sleep
+      if(data.last && (now - data.last) > 30*1000)
+        this.retry();
+      data.last = now;
+      data.t = setTimeout(this.sleepCheck.bind(this), 5*1000);
     },
     connmessage: function(event) {
       var update;
@@ -762,8 +774,9 @@ if (typeof exports !== "undefined") {
     connclose: function() {
       this.connected = false;
       this.ondisconnect();
+      //backoff retry connection
       this.delay *= 2;
-      if(this.autoretry && velox.online) {
+      if(this.retrying && velox.online) {
         this.retry.t = setTimeout(this.connect.bind(this), this.delay);
       }
     },

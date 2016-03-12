@@ -18,6 +18,7 @@ type Conn interface {
 	ID() string
 	Connected() bool
 	Wait()
+	Push()
 	Close() error
 }
 
@@ -29,11 +30,13 @@ type transport interface {
 
 type conn struct {
 	transport
-	connected bool
-	id        string
-	uptime    time.Time
-	version   int64
-	waiter    sync.WaitGroup
+	state      *State
+	connected  bool
+	id         string
+	uptime     time.Time
+	version    int64
+	sendingMut sync.Mutex
+	waiter     sync.WaitGroup
 }
 
 func (c *conn) ID() string {
@@ -49,9 +52,22 @@ func (c *conn) Wait() {
 	c.waiter.Wait()
 }
 
+//Push will the current state only to this client.
+//Blocks until push is complete.
+func (c *conn) Push() {
+	c.state.pushTo(c)
+}
+
 //Force close the connection.
 func (c *conn) Close() error {
 	return c.transport.close()
+}
+
+//send to connection, ensure only 1 concurrent sender
+func (c *conn) send(upd *update) error {
+	c.sendingMut.Lock()
+	defer c.sendingMut.Unlock()
+	return c.transport.send(upd)
 }
 
 //=========================

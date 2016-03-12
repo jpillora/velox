@@ -13,12 +13,18 @@ const proto = "v2"
 
 var JS = assets.VeloxJS
 
+type syncer interface {
+	sync(gostruct interface{}) (*State, error)
+}
+
 //SyncHandler is a small wrapper around Sync which simply synchronises
 //all incoming connections. Use Sync if you wish to implement user authentication
 //or any other request-time checks.
 func SyncHandler(gostruct interface{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if conn, err := Sync(gostruct, w, r); err == nil {
+			//do an initial push only to this client
+			conn.Push()
 			conn.Wait()
 		}
 	})
@@ -29,9 +35,7 @@ func SyncHandler(gostruct interface{}) http.Handler {
 //in the event of failure.
 func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, error) {
 	//access gostruct.State via interfaces:
-	gosyncable, ok := gostruct.(interface {
-		sync(gostruct interface{}) (*State, error)
-	})
+	gosyncable, ok := gostruct.(syncer)
 	if !ok {
 		return nil, fmt.Errorf("cannot sync: does not embed velox.State")
 	}
@@ -50,6 +54,7 @@ func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, e
 	//ready
 	conn := &conn{
 		id:        r.RemoteAddr,
+		state:     state,
 		connected: true,
 		uptime:    time.Now(),
 		version:   version,
@@ -80,13 +85,6 @@ func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, e
 		conn.waiter.Done()
 	}()
 	<-isConnected
-	//initial update
-	if state.version != conn.version {
-		conn.transport.send(&update{
-			Body:    state.bytes,
-			Version: state.version,
-		})
-	}
 	//hand over to state to keep in sync
 	state.subscribe(conn)
 	//pass connection to user

@@ -52,7 +52,7 @@ func main() {
 			}
 			//show number of connections 'foo' is currently handling
 			foo.NumConnections = foo.State.NumConnections()
-			//push to observers
+			//push to all connections
 			foo.Push()
 			//do other stuff...
 			time.Sleep(250 * time.Millisecond)

@@ -26,7 +26,9 @@ type State struct {
 	initMut  sync.Mutex
 	initd    bool
 	gostruct interface{}
+	dataMut  sync.RWMutex //protects bytes/delta/version
 	bytes    []byte
+	delta    []byte
 	version  int64
 	connMut  sync.Mutex
 	conns    map[string]*conn
@@ -132,42 +134,54 @@ func (s *State) gopush() {
 	}
 	//calculate change set from last version
 	ops, _ := jsonpatch.CreatePatch(s.bytes, newBytes)
-	if len(s.bytes) > 0 && len(ops) == 0 {
-		return //nochange - skip
+	if len(s.bytes) > 0 && len(ops) > 0 {
+		//changes! bump version
+		s.dataMut.Lock()
+		s.delta, _ = json.Marshal(ops)
+		s.bytes = newBytes
+		s.version++
+		s.dataMut.Unlock()
 	}
-	delta, _ := json.Marshal(ops)
-	prev := s.version
-	s.version++
 	//send this new change to each subscriber
 	s.connMut.Lock()
 	for _, c := range s.conns {
-		s.push.wg.Add(1)
-		go func(c *conn) {
-			update := &update{Version: s.version}
-			//choose optimal update (send the smallest)
-			if c.version == prev && len(s.bytes) > 0 && len(delta) < len(s.bytes) {
-				update.Delta = true
-				update.Body = delta
-			} else {
-				update.Delta = false
-				update.Body = newBytes
-			}
-			//send update
-			if err := c.send(update); err == nil {
-				c.version = s.version //sent! mark this version
-			}
-			//pushed!
-			s.push.wg.Done()
-		}(c)
+		if c.version != s.version {
+			s.push.wg.Add(1)
+			go func(c *conn) {
+				s.pushTo(c)
+				s.push.wg.Done()
+			}(c)
+		}
 	}
 	s.connMut.Unlock()
 	//wait for all connection pushes
 	s.push.wg.Wait()
-	//mark new state which has been sent out to all
-	s.bytes = newBytes
+	//cleanup()
 }
 
-//A single update. Maybe contain compression flags in future.
+func (s *State) pushTo(c *conn) {
+	if c.version == s.version {
+		return
+	}
+	update := &update{Version: s.version}
+	s.dataMut.RLock()
+	//choose optimal update (send the smallest)
+	if s.delta != nil && c.version == (s.version-1) && len(s.bytes) > 0 && len(s.delta) < len(s.bytes) {
+		update.Delta = true
+		update.Body = s.delta
+	} else {
+		update.Delta = false
+		update.Body = s.bytes
+	}
+	//send update
+	log.Printf("[%s] sending version %d (delta: %v)", c.id, s.version, update.Delta)
+	if err := c.send(update); err == nil {
+		c.version = s.version //sent! mark this version
+	}
+	s.dataMut.RUnlock()
+}
+
+//A single update. May contain compression flags in future.
 type update struct {
 	Ping    bool            `json:"ping,omitempty"`
 	Delta   bool            `json:"delta,omitempty"`
