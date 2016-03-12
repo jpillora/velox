@@ -174,7 +174,6 @@ func (s *State) pushTo(c *conn) {
 		update.Body = s.bytes
 	}
 	//send update
-	log.Printf("[%s] sending version %d (delta: %v)", c.id, s.version, update.Delta)
 	if err := c.send(update); err == nil {
 		c.version = s.version //sent! mark this version
 	}
