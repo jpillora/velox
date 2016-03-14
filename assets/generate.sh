@@ -1,5 +1,5 @@
 #!/bin/bash
-banner="// velox - v0.2.3 - https://github.com/jpillora/velox
+banner="// velox - v0.2.4 - https://github.com/jpillora/velox
 // Jaime Pillora <dev@jpillora.com> - MIT Copyright 2016"
 echo "create dist"
 echo "$banner" > dist/velox.js
