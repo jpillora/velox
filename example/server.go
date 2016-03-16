@@ -101,6 +101,9 @@ var v = velox.sse("/sync", foo);
 v.onupdate = function() {
 	example.innerHTML = JSON.stringify(foo, null, 2);
 };
+v.onchange = function(isConnected) {
+	console.log("is connected", isConnected);
+}
 </script>
 `)
 

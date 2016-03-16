@@ -59,8 +59,9 @@ Client API
 * `velox.ws(url, object)` *function* returns `v` - Creates a new WS velox connection
 * `v.onupdate(object)` *function* - Called when a server push is received
 * `v.onerror(err)` *function* - Called when a connection error occurs
-* `v.onconnect()` *function* - Called when the connection is established
+* `v.onconnect()` *function* - Called when the connection is opened
 * `v.ondisconnect()` *function* - Called when the connection is closed
+* `v.onchange(isconnected)` *function* - Called when the connection is opened or closed
 * `v.connected` *bool* - Denotes whether the connection is currently open
 * `v.ws` *bool* - Denotes whether the connection is in web sockets mode
 * `v.sse` *bool* - Denotes whether the connection is in server-sent events mode

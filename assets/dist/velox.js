@@ -1,4 +1,4 @@
-// velox - v0.2.4 - https://github.com/jpillora/velox
+// velox - v0.2.5 - https://github.com/jpillora/velox
 // Jaime Pillora <dev@jpillora.com> - MIT Copyright 2016
 (function() {
 ;(function (global) {
@@ -667,6 +667,7 @@ if (typeof exports !== "undefined") {
     this.onerror = function() {/*noop*/};
     this.onconnect = function() {/*noop*/};
     this.ondisconnect = function() {/*noop*/};
+    this.onchange = function() {/*noop*/};
     this.connected = false;
     this.connect();
   }
@@ -705,15 +706,16 @@ if (typeof exports !== "undefined") {
       clearTimeout(this.pingout.t);
       if(!this.conn)
         return;
-      var conn = this.conn;
+      var c = this.conn;
       this.conn = null;
       events.forEach(function(e) {
-        conn["on"+e] = null;
+        c["on"+e] = null;
       });
-      if(conn && (conn instanceof EventSource && conn.readyState !== EventSource.CLOSED) ||
-          (conn instanceof WebSocket && conn.readyState !== WebSocket.CLOSED)) {
-        conn.close();
+      if(c && (c instanceof EventSource && c.readyState !== EventSource.CLOSED) ||
+          (c instanceof WebSocket && c.readyState !== WebSocket.CLOSED)) {
+        c.close();
       }
+      this.statusCheck();
     },
     send: function(data) {
       if(this.conn && this.conn instanceof WebSocket && this.conn.readyState === WebSocket.OPEN) {
@@ -737,6 +739,26 @@ if (typeof exports !== "undefined") {
       data.last = now;
       data.t = setTimeout(this.sleepCheck.bind(this), 5*1000);
       if(woken) this.retry();
+    },
+    statusCheck: function(err) {
+      var curr = !!this.connected;
+      var next = undefined;
+      var c = this.conn;
+      if(c && (c instanceof EventSource && c.readyState === EventSource.OPEN) ||
+            (c instanceof WebSocket && c.readyState === WebSocket.OPEN)) {
+        next = true;
+      } else {
+        next = false;
+      }
+      if(curr !== next) {
+        this.connected = next;
+        this.onchange(this.connected);
+        if(this.connected) {
+          this.onconnect();
+        } else {
+          this.ondisconnect();
+        }
+      }
     },
     connmessage: function(event) {
       var update;
@@ -768,13 +790,11 @@ if (typeof exports !== "undefined") {
       this.delay = 100;
     },
     connopen: function() {
-      this.connected = true;
-      this.onconnect();
-      this.pingin(); //treat initial connection as ping
+      this.statusCheck();
+      this.pingin(); //treat initial connection as incoming ping
     },
     connclose: function() {
-      this.connected = false;
-      this.ondisconnect();
+      this.statusCheck();
       //backoff retry connection
       this.delay *= 2;
       if(this.retrying && velox.online) {
@@ -782,6 +802,7 @@ if (typeof exports !== "undefined") {
       }
     },
     connerror: function(err) {
+      this.statusCheck();
       this.onerror(err);
     }
   };
