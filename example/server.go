@@ -83,7 +83,7 @@ var indexhtml = []byte(`
 &lt;script src="/velox.js">&lt;/script>
 &lt;script>
 var foo = {};
-var v = velox.sse("/sync", foo);
+var v = velox("/sync", foo);
 v.onupdate = function() {
 	example.innerHTML = JSON.stringify(foo, null, 2);
 };
@@ -97,7 +97,7 @@ v.onupdate = function() {
 <script src="/velox.js"></script>
 <script>
 var foo = {};
-var v = velox.sse("/sync", foo);
+var v = velox("/sync", foo);
 v.onupdate = function() {
 	example.innerHTML = JSON.stringify(foo, null, 2);
 };

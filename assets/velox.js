@@ -4,18 +4,24 @@
   var proto = "v2";
   var vs = [];
   //public method
-  var velox = function(type, url, obj) {
+  var construct = function(type, url, obj) {
     var v = new Velox(type, url, obj);
     vs.push(v);
     return v;
+  }
+  var velox = function(url, obj) {
+    if(window.WebSocket)
+      return velox.ws(url, obj);
+    else
+      return velox.sse(url, obj);
   };
   velox.WS = {};
   velox.ws = function(url, obj) {
-    return velox(velox.WS, url, obj)
+    return construct(velox.WS, url, obj)
   };
   velox.SSE = {};
   velox.sse = function(url, obj) {
-    return velox(velox.SSE, url, obj)
+    return construct(velox.SSE, url, obj)
   };
   velox.proto = proto;
   velox.online = true;

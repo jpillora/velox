@@ -61,8 +61,10 @@ func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, e
 	}
 	if r.Header.Get("Accept") == "text/event-stream" {
 		conn.transport = &evtSrcTrans{}
-	} else {
+	} else if r.Header.Get("Upgrade") == "websocket" {
 		conn.transport = &wsTrans{}
+	} else {
+		return nil, fmt.Errorf("Invalid sync request")
 	}
 	//connect to client over set transport
 	conn.waiter.Add(1)

@@ -41,7 +41,7 @@ Client
 ``` js
 // load script /velox.js
 var foo = {};
-var v = velox.sse("/sync", foo); //choose either: velox.sse() or velox.ws()
+var v = velox("/sync", foo); //uses websockets if supported, otherwise, use sse
 v.onupdate = function() {
 	//foo.A === 42 and foo.B === 21
 };
@@ -55,6 +55,7 @@ Server API
 
 Client API
 
+* `velox(url, object)` *function* returns `v` - Creates a new auto-detect velox connection
 * `velox.sse(url, object)` *function* returns `v` - Creates a new SSE velox connection
 * `velox.ws(url, object)` *function* returns `v` - Creates a new WS velox connection
 * `v.onupdate(object)` *function* - Called when a server push is received
@@ -70,7 +71,7 @@ Client API
 
 See this [simple `example/`](example/) and view it live here: https://velox.jpillora.com
 
-![screen shot 2016-03-03 at 12 41 44 pm](https://cloud.githubusercontent.com/assets/633843/13481947/8eea1804-e13d-11e5-80c8-be9317c54fbc.png)
+![screenshot](https://cloud.githubusercontent.com/assets/633843/13481947/8eea1804-e13d-11e5-80c8-be9317c54fbc.png)
 
 *Here is a screenshot from this example page, showing the messages arriving as either a full replacement of the object or just a delta. The server will send which ever is smaller.*
 
