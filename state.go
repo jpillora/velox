@@ -7,6 +7,7 @@ import (
 	"log"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mattbaird/jsonpatch"
@@ -34,7 +35,7 @@ type State struct {
 	conns    map[string]*conn
 	push     struct {
 		mut    sync.Mutex
-		ing    bool
+		ing    uint32
 		queued bool
 		start  time.Time
 		wg     sync.WaitGroup
@@ -101,13 +102,13 @@ func (s *State) Push() {
 
 //non-blocking push
 func (s *State) gopush() {
-	s.push.mut.Lock()
-	if s.push.ing {
+	//attempt to mark state as 'pushing'
+	if !atomic.CompareAndSwapUint32(&s.push.ing, 0, 1) {
+		//if already pushing, mark queued
 		s.push.queued = true
-		s.push.mut.Unlock()
 		return
 	}
-	s.push.ing = true
+	s.push.mut.Lock()
 	s.push.start = time.Now()
 	//queue cleanup
 	defer func() {
@@ -116,8 +117,9 @@ func (s *State) gopush() {
 		if t := s.Throttle - tdelta; t > 0 {
 			time.Sleep(t)
 		}
+		//mark not 'pushing'
+		atomic.CompareAndSwapUint32(&s.push.ing, 1, 0)
 		//cleanup
-		s.push.ing = false
 		if s.push.queued {
 			s.push.queued = false
 			s.push.mut.Unlock()

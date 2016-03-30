@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/jpillora/velox"
@@ -13,6 +14,7 @@ import (
 type Foo struct {
 	velox.State    //adds sync state and an Update() method
 	NumConnections int
+	NumGoRoutines  int
 	A, B           int
 	C              map[string]int
 	D              Bar
@@ -52,10 +54,11 @@ func main() {
 			}
 			//show number of connections 'foo' is currently handling
 			foo.NumConnections = foo.State.NumConnections()
+			foo.NumGoRoutines = runtime.NumGoroutine()
 			//push to all connections
 			foo.Push()
 			//do other stuff...
-			time.Sleep(250 * time.Millisecond)
+			time.Sleep(2500 * time.Millisecond)
 		}
 	}()
 	//sync handlers
