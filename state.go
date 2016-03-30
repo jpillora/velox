@@ -127,10 +127,20 @@ func (s *State) gopush() {
 		}
 	}()
 	//calculate new json state
+	l, hasLock := s.gostruct.(sync.Locker)
+	if hasLock {
+		l.Lock()
+	}
 	newBytes, err := json.Marshal(s.gostruct)
 	if err != nil {
 		log.Printf("velox: marshal failed: %s", err)
+		if hasLock {
+			l.Unlock()
+		}
 		return
+	}
+	if hasLock {
+		l.Unlock()
 	}
 	//calculate change set from last version
 	ops, _ := jsonpatch.CreatePatch(s.bytes, newBytes)
