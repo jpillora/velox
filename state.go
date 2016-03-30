@@ -36,7 +36,7 @@ type State struct {
 	push     struct {
 		mut    sync.Mutex
 		ing    uint32
-		queued bool
+		queued uint32
 		start  time.Time
 		wg     sync.WaitGroup
 	}
@@ -97,17 +97,17 @@ func (s *State) NumConnections() int {
 //Push is thread-safe and is throttled so it can be called
 //with abandon.
 func (s *State) Push() {
-	go s.gopush()
+	//attempt to mark state as 'pushing'
+	if atomic.CompareAndSwapUint32(&s.push.ing, 0, 1) {
+		go s.gopush()
+	} else {
+		//if already pushing, mark queued
+		atomic.StoreUint32(&s.push.queued, 1)
+	}
 }
 
 //non-blocking push
 func (s *State) gopush() {
-	//attempt to mark state as 'pushing'
-	if !atomic.CompareAndSwapUint32(&s.push.ing, 0, 1) {
-		//if already pushing, mark queued
-		s.push.queued = true
-		return
-	}
 	s.push.mut.Lock()
 	s.push.start = time.Now()
 	//queue cleanup
@@ -118,10 +118,9 @@ func (s *State) gopush() {
 			time.Sleep(t)
 		}
 		//mark not 'pushing'
-		atomic.CompareAndSwapUint32(&s.push.ing, 1, 0)
+		atomic.StoreUint32(&s.push.ing, 0)
 		//cleanup
-		if s.push.queued {
-			s.push.queued = false
+		if atomic.CompareAndSwapUint32(&s.push.ing, 1, 0) {
 			s.push.mut.Unlock()
 			s.Push() //auto-push
 		} else {

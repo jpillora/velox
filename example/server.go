@@ -58,7 +58,7 @@ func main() {
 			//push to all connections
 			foo.Push()
 			//do other stuff...
-			time.Sleep(2500 * time.Millisecond)
+			time.Sleep(250 * time.Millisecond)
 		}
 	}()
 	//sync handlers
