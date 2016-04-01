@@ -10,6 +10,6 @@ which uglifyjs > /dev/null || (echo "please 'npm install uglify-js'"; exit 1)
 echo "minify dist"
 echo "$banner" > dist/velox.min.js
 uglifyjs --mangle -c=dead_code dist/velox.js >> dist/velox.min.js || (echo "uglify failed"; exit 1)
-go-bindata -pkg assets -o assets.go dist/velox.min.js || (echo "go-bindata failed"; exit 1)
-echo "embedded dist"
+echo "embed dist"
+go-bindata -pkg assets -o assets.go dist/velox.js dist/velox.min.js || (echo "go-bindata failed"; exit 1)
 exit 0

@@ -1,6 +1,9 @@
 package velox
 
 import (
+	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +27,7 @@ type State struct {
 	//configuration
 	Throttle time.Duration `json:"-"`
 	//internal state
+	id       string
 	initMut  sync.Mutex
 	initd    bool
 	gostruct interface{}
@@ -46,11 +50,15 @@ func (s *State) init(gostruct interface{}) error {
 	if s.Throttle < MinThrottle {
 		s.Throttle = DefaultThrottle
 	}
-	//initial JSON bytes
+	//get initial JSON bytes and confirm gostruct is marshallable
 	if b, err := json.Marshal(gostruct); err != nil {
 		return fmt.Errorf("JSON marshalling failed: %s", err)
 	} else {
 		s.bytes = b
+	}
+	id := make([]byte, 4)
+	if n, _ := rand.Read(id); n > 0 {
+		s.id = hex.EncodeToString(id)
 	}
 	s.gostruct = gostruct
 	s.version = 1
@@ -120,9 +128,9 @@ func (s *State) gopush() {
 		//mark not 'pushing'
 		atomic.StoreUint32(&s.push.ing, 0)
 		//cleanup
-		if atomic.CompareAndSwapUint32(&s.push.ing, 1, 0) {
+		if atomic.CompareAndSwapUint32(&s.push.queued, 1, 0) {
 			s.push.mut.Unlock()
-			s.Push() //auto-push
+			s.Push() //auto-push when queued
 		} else {
 			s.push.mut.Unlock()
 		}
@@ -143,16 +151,21 @@ func (s *State) gopush() {
 	if hasLock {
 		l.Unlock()
 	}
-	//calculate change set from last version
-	ops, _ := jsonpatch.CreatePatch(s.bytes, newBytes)
-	if len(s.bytes) > 0 && len(ops) > 0 {
-		//changes! bump version
-		s.dataMut.Lock()
-		s.delta, _ = json.Marshal(ops)
-		s.bytes = newBytes
-		s.version++
-		s.dataMut.Unlock()
+
+	//if changed, then calculate change set
+	if !bytes.Equal(s.bytes, newBytes) {
+		//calculate change set from last version
+		ops, _ := jsonpatch.CreatePatch(s.bytes, newBytes)
+		if len(s.bytes) > 0 && len(ops) > 0 {
+			//changes! bump version
+			s.dataMut.Lock()
+			s.delta, _ = json.Marshal(ops)
+			s.bytes = newBytes
+			s.version++
+			s.dataMut.Unlock()
+		}
 	}
+
 	//send this new change to each subscriber
 	s.connMut.Lock()
 	for _, c := range s.conns {
@@ -174,8 +187,14 @@ func (s *State) pushTo(c *conn) {
 	if c.version == s.version {
 		return
 	}
-	update := &update{Version: s.version}
+	update := &update{
+		Version: s.version,
+	}
 	s.dataMut.RLock()
+	//first push? include id
+	if atomic.CompareAndSwapUint32(&c.first, 0, 1) {
+		update.ID = s.id
+	}
 	//choose optimal update (send the smallest)
 	if s.delta != nil && c.version == (s.version-1) && len(s.bytes) > 0 && len(s.delta) < len(s.bytes) {
 		update.Delta = true
@@ -193,6 +212,7 @@ func (s *State) pushTo(c *conn) {
 
 //A single update. May contain compression flags in future.
 type update struct {
+	ID      string          `json:"id,omitempty"`
 	Ping    bool            `json:"ping,omitempty"`
 	Delta   bool            `json:"delta,omitempty"`
 	Version int64           `json:"version,omitempty"` //53 usable bits

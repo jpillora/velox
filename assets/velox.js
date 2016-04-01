@@ -82,6 +82,7 @@
     if(!obj || typeof obj !== "object")
       throw "Invalid object";
     this.obj = obj;
+    this.id = "";
     this.version = 0;
     this.onupdate = function() {/*noop*/};
     this.onerror = function() {/*noop*/};
@@ -104,7 +105,13 @@
         return;
       if(!this.delay)
         this.delay = 100;
-      var url = this.url + (/\?/.test(this.url) ? "&" : "?") + "p="+proto+"&v="+this.version
+      //set url
+      var url = this.url;
+      var params = [];
+      if(this.version) params.push("v="+this.version);
+      if(this.id) params.push("id="+this.id);
+      if(params.length) url += (/\?/.test(this.url) ? "&" : "?") + params.join("&");
+      //connect!
       if(this.ws) {
         this.conn = new WebSocket(url);
       } else {
@@ -191,6 +198,10 @@
       if(update.ping) {
         this.pingin();
         return
+      }
+      if(update.id) {
+        this.id = update.id;
+        return;
       }
       if(!update.body || !this.obj) {
         this.onerror("null objects");

@@ -11,21 +11,24 @@ import (
 )
 
 //embedded JS file
+var veloxJSDevelopBytes = MustAsset("dist/velox.js")
 var veloxJSBytes = MustAsset("dist/velox.min.js")
-var veloxJSBytesCompressed []byte
+var veloxJSBytesGzipped []byte
 
 var VeloxJS = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 	b := veloxJSBytes
-	//lazy decompression
-	if strings.Contains(req.Header.Get("Accept-Encoding"), "gzip") {
-		if veloxJSBytesCompressed == nil {
+	if _, ok := req.URL.Query()["dev"]; ok {
+		b = veloxJSDevelopBytes
+	} else if strings.Contains(req.Header.Get("Accept-Encoding"), "gzip") {
+		//lazy compression
+		if veloxJSBytesGzipped == nil {
 			buff := bytes.Buffer{}
 			g := gzip.NewWriter(&buff)
 			g.Write(veloxJSBytes)
 			g.Close()
-			veloxJSBytesCompressed = buff.Bytes()
+			veloxJSBytesGzipped = buff.Bytes()
 		}
-		b = veloxJSBytesCompressed
+		b = veloxJSBytesGzipped
 		w.Header().Set("Content-Encoding", "gzip")
 	}
 	w.Header().Set("Content-Type", "text/javascript")

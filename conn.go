@@ -33,6 +33,7 @@ type conn struct {
 	state      *State
 	connected  bool
 	id         string
+	first      uint32
 	uptime     time.Time
 	version    int64
 	sendingMut sync.Mutex
@@ -130,6 +131,7 @@ func (ew *evtSrcWriter) CloseNotify() <-chan bool {
 	return ew.ResponseWriter.(http.CloseNotifier).CloseNotify()
 }
 
+//HACK: uses eventsource's call to flush as a signal, that its connected
 func (ew *evtSrcWriter) Flush() {
 	if !ew.isFlushed {
 		ew.isConnected <- true
@@ -157,6 +159,8 @@ func (es *evtSrcTrans) send(upd *update) error {
 }
 
 func (es *evtSrcTrans) close() error {
-	es.s.Close()
+	if es.s != nil {
+		es.s.Close()
+	}
 	return nil
 }

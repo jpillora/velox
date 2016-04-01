@@ -9,7 +9,8 @@ import (
 	"github.com/jpillora/velox/assets"
 )
 
-const proto = "v2"
+//NOTE(@jpillora): always assume v1, include v2 in checks when we get there...
+const proto = "v1"
 
 var JS = assets.VeloxJS
 
@@ -39,17 +40,17 @@ func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, e
 	if !ok {
 		return nil, fmt.Errorf("cannot sync: does not embed velox.State")
 	}
-	//pass gostruct into gostruct.State and get its gostruct.State back out
+	//extract internal state from gostruct
 	state, err := gosyncable.sync(gostruct)
 	if err != nil {
 		return nil, fmt.Errorf("cannot sync: %s", err)
 	}
-	if r.URL.Query().Get("p") != proto {
-		return nil, fmt.Errorf("protocol version mismatch")
-	}
 	version := int64(0)
-	if v, err := strconv.ParseInt(r.URL.Query().Get("v"), 10, 64); err == nil {
-		version = v
+	//matching id, allow user to pick version
+	if id := r.URL.Query().Get("id"); id != "" && id == state.id {
+		if v, err := strconv.ParseInt(r.URL.Query().Get("v"), 10, 64); err == nil && v > 0 {
+			version = v
+		}
 	}
 	//ready
 	conn := &conn{
@@ -85,7 +86,9 @@ func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, e
 		//disconnected, done waiting
 		conn.connected = false
 		conn.waiter.Done()
+		conn.close()
 	}()
+	//wait here until transport completes connection
 	<-isConnected
 	//hand over to state to keep in sync
 	state.subscribe(conn)
