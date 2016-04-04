@@ -1,4 +1,4 @@
-// velox - v0.2.5 - https://github.com/jpillora/velox
+// velox - v0.2.6 - https://github.com/jpillora/velox
 // Jaime Pillora <dev@jpillora.com> - MIT Copyright 2016
 (function() {
 ;(function (global) {
@@ -787,7 +787,6 @@ if (typeof exports !== "undefined") {
       }
       if(update.id) {
         this.id = update.id;
-        return;
       }
       if(!update.body || !this.obj) {
         this.onerror("null objects");

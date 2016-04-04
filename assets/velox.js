@@ -201,7 +201,6 @@
       }
       if(update.id) {
         this.id = update.id;
-        return;
       }
       if(!update.body || !this.obj) {
         this.onerror("null objects");
