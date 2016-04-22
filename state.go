@@ -67,6 +67,17 @@ func (s *State) init(gostruct interface{}) error {
 	return nil
 }
 
+//ID uniquely identifies this state object
+func (s *State) ID() string {
+	return s.id
+}
+
+//Version of this state object (when the underlying struct is
+//and a Push is performed, this version number is incremented).
+func (s *State) Version() int64 {
+	return s.version
+}
+
 func (s *State) sync(gostruct interface{}) (*State, error) {
 	s.initMut.Lock()
 	defer s.initMut.Unlock()
@@ -103,15 +114,16 @@ func (s *State) NumConnections() int {
 
 //Send the changes from this object to all connected clients.
 //Push is thread-safe and is throttled so it can be called
-//with abandon.
-func (s *State) Push() {
+//with abandon. Returns false if a Push has already been queued.
+func (s *State) Push() bool {
 	//attempt to mark state as 'pushing'
 	if atomic.CompareAndSwapUint32(&s.push.ing, 0, 1) {
 		go s.gopush()
-	} else {
-		//if already pushing, mark queued
-		atomic.StoreUint32(&s.push.queued, 1)
+		return true
 	}
+	//if already pushing, mark queued
+	atomic.StoreUint32(&s.push.queued, 1)
+	return false
 }
 
 //non-blocking push
@@ -141,17 +153,13 @@ func (s *State) gopush() {
 		l.Lock()
 	}
 	newBytes, err := json.Marshal(s.gostruct)
-	if err != nil {
-		log.Printf("velox: marshal failed: %s", err)
-		if hasLock {
-			l.Unlock()
-		}
-		return
-	}
 	if hasLock {
 		l.Unlock()
 	}
-
+	if err != nil {
+		log.Printf("velox: marshal failed: %s", err)
+		return
+	}
 	//if changed, then calculate change set
 	if !bytes.Equal(s.bytes, newBytes) {
 		//calculate change set from last version
