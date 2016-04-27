@@ -211,11 +211,14 @@ func (s *State) pushTo(c *conn) {
 		update.Delta = false
 		update.Body = s.bytes
 	}
+	s.dataMut.RUnlock()
 	//send update
 	if err := c.send(update); err == nil {
-		c.version = s.version //sent! mark this version
+		//on success, update client version
+		s.dataMut.RLock()
+		c.version = s.version
+		s.dataMut.RUnlock()
 	}
-	s.dataMut.RUnlock()
 }
 
 //A single update. May contain compression flags in future.

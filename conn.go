@@ -82,8 +82,7 @@ var defaultUpgrader = websocket.Upgrader{
 }
 
 type wsTrans struct {
-	writeLock sync.Mutex
-	conn      *websocket.Conn
+	conn *websocket.Conn
 }
 
 func (ws *wsTrans) connect(w http.ResponseWriter, r *http.Request, isConnected chan bool) error {
@@ -107,10 +106,7 @@ func (ws *wsTrans) connect(w http.ResponseWriter, r *http.Request, isConnected c
 }
 
 func (ws *wsTrans) send(upd *update) error {
-	ws.writeLock.Lock()
-	err := ws.conn.WriteJSON(upd)
-	ws.writeLock.Unlock()
-	return err
+	return ws.conn.WriteJSON(upd)
 }
 
 func (ws *wsTrans) close() error {
