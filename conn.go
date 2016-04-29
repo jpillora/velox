@@ -118,7 +118,7 @@ func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 
 //send to connection, ensure only 1 concurrent sender
 func (c *conn) send(upd *update) error {
-	if !c.Connected() {
+	if c.transport == nil {
 		return errors.New("not connected")
 	}
 	c.sendingMut.Lock()
