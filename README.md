@@ -103,6 +103,10 @@ See this [simple `example/`](example/) and view it live here: https://velox.jpil
 * Use deflate in [the client](https://github.com/dankogai/js-deflate) and on [the server](https://golang.org/pkg/compress/flate/) for more byte savings.
 -->
 
+### TODO
+
+* WebRTC support
+
 #### MIT License
 
 Copyright © 2016 Jaime Pillora &lt;dev@jpillora.com&gt;

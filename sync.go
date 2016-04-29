@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/jpillora/velox/assets"
 )
@@ -38,12 +37,12 @@ func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, e
 	//access gostruct.State via interfaces:
 	gosyncable, ok := gostruct.(syncer)
 	if !ok {
-		return nil, fmt.Errorf("cannot sync: does not embed velox.State")
+		return nil, fmt.Errorf("velox sync failed: struct does not embed velox.State")
 	}
 	//extract internal state from gostruct
 	state, err := gosyncable.sync(gostruct)
 	if err != nil {
-		return nil, fmt.Errorf("cannot sync: %s", err)
+		return nil, fmt.Errorf("velox sync failed: %s", err)
 	}
 	version := int64(0)
 	//matching id, allow user to pick version
@@ -52,44 +51,18 @@ func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, e
 			version = v
 		}
 	}
-	//ready
+	//set initial connection state
 	conn := &conn{
-		id:        r.RemoteAddr,
-		state:     state,
-		connected: true,
-		uptime:    time.Now(),
-		version:   version,
+		id:      r.RemoteAddr,
+		state:   state,
+		version: version,
 	}
-	if r.Header.Get("Accept") == "text/event-stream" {
-		conn.transport = &evtSrcTrans{}
-	} else if r.Header.Get("Upgrade") == "websocket" {
-		conn.transport = &wsTrans{}
-	} else {
-		return nil, fmt.Errorf("Invalid sync request")
+	//attempt connection over transport
+	//(negotiate websockets / start eventsource emitter)
+	//return when connected
+	if err := conn.connect(w, r); err != nil {
+		return nil, fmt.Errorf("velox connection failed: %s", err)
 	}
-	//connect to client over set transport
-	conn.waiter.Add(1)
-	isConnected := make(chan bool)
-	go func() {
-		//ping loop (every 25s, browser timesout after 30s)
-		go func() {
-			for conn.connected {
-				time.Sleep(25 * time.Second)
-				conn.transport.send(&update{Ping: true})
-			}
-		}()
-		//connect and block
-		if err = conn.transport.connect(w, r, isConnected); err != nil {
-			//TODO(jpillora): log nicely
-			// log.Printf("connection error: %s", err)
-		}
-		//disconnected, done waiting
-		conn.connected = false
-		conn.waiter.Done()
-		conn.close()
-	}()
-	//wait here until transport completes connection
-	<-isConnected
 	//hand over to state to keep in sync
 	state.subscribe(conn)
 	//pass connection to user

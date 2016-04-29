@@ -1,4 +1,4 @@
-// velox - v0.2.6 - https://github.com/jpillora/velox
+// velox - v0.2.7 - https://github.com/jpillora/velox
 // Jaime Pillora <dev@jpillora.com> - MIT Copyright 2016
 (function() {
 ;(function (global) {
@@ -588,29 +588,36 @@ if (typeof exports !== "undefined") {
 (function(window, document) {
   //velox protocol version
   var proto = "v2";
-  var vs = [];
   //public method
-  var construct = function(type, url, obj) {
-    var v = new Velox(type, url, obj);
-    vs.push(v);
-    return v;
-  }
   var velox = function(url, obj) {
-    if(window.WebSocket)
+    if(velox.DEFAULT === velox.WS && window.WebSocket)
       return velox.ws(url, obj);
     else
       return velox.sse(url, obj);
   };
-  velox.WS = {};
+  velox.WS = velox.DEFAULT = {ws:true};
   velox.ws = function(url, obj) {
-    return construct(velox.WS, url, obj)
+    return new Velox(velox.WS, url, obj)
   };
-  velox.SSE = {};
+  velox.SSE = {sse:true};
   velox.sse = function(url, obj) {
-    return construct(velox.SSE, url, obj)
+    return new Velox(velox.SSE, url, obj)
   };
   velox.proto = proto;
   velox.online = true;
+  //global status change handler
+  //performs instant retries when the users
+  //internet connection returns
+  var vs = velox.connections = [];
+  function onstatus(event) {
+    velox.online = navigator.onLine;
+    if(velox.online)
+      for(var i = 0; i < vs.length; i++)
+        if(vs[i].retrying)
+          vs[i].retry();
+  }
+  window.addEventListener('online',  onstatus);
+  window.addEventListener('offline', onstatus);
   //recursive merge (x <- y) - ignore $properties
   var merge = function(x, y) {
     if (!x || typeof x !== "object" || !y || typeof y !== "object")
@@ -631,15 +638,6 @@ if (typeof exports !== "undefined") {
       x[k] = merge(x[k], y[k]);
     return x;
   };
-  //global status change handler
-  function onstatus(event) {
-    velox.online = navigator.onLine;
-    for(var i = 0; i < vs.length; i++)
-      if(velox.online && vs[i].retrying)
-        vs[i].retry();
-  }
-  window.addEventListener('online',  onstatus);
-  window.addEventListener('offline', onstatus);
   //helpers
   var events = ["message","error","open","close"];
   var loc = window.location;
@@ -658,12 +656,6 @@ if (typeof exports !== "undefined") {
     if(!url) {
       url = "/velox";
     }
-    if(!(/^(ws|http)s?:/.test(url))) {
-      url = loc.protocol + "//" + loc.host + url;
-    }
-    if(this.ws) {
-      url = url.replace(/^http/, "ws");
-    }
     this.url = url;
     if(!obj || typeof obj !== "object")
       throw "Invalid object";
@@ -680,6 +672,8 @@ if (typeof exports !== "undefined") {
   }
   Velox.prototype = {
     connect: function() {
+      if(vs.indexOf(this) === -1)
+        vs.push(this);
       this.retrying = true;
       this.retry();
     },
@@ -693,6 +687,12 @@ if (typeof exports !== "undefined") {
         this.delay = 100;
       //set url
       var url = this.url;
+      if(!(/^(ws|http)s?:/.test(url))) {
+        url = loc.protocol + "//" + loc.host + url;
+      }
+      if(this.ws) {
+        url = url.replace(/^http/, "ws");
+      }
       var params = [];
       if(this.version) params.push("v="+this.version);
       if(this.id) params.push("id="+this.id);
@@ -712,6 +712,8 @@ if (typeof exports !== "undefined") {
       this.sleepCheck();
     },
     disconnect: function() {
+      var i = vs.indexOf(this);
+      if(i >= 0) vs.splice(i, 1);
       this.retrying = false;
       this.cleanup();
     },

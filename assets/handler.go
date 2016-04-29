@@ -19,7 +19,8 @@ var VeloxJS = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 	b := veloxJSBytes
 	if _, ok := req.URL.Query()["dev"]; ok {
 		b = veloxJSDevelopBytes
-	} else if strings.Contains(req.Header.Get("Accept-Encoding"), "gzip") {
+	}
+	if strings.Contains(req.Header.Get("Accept-Encoding"), "gzip") {
 		//lazy compression
 		if veloxJSBytesGzipped == nil {
 			buff := bytes.Buffer{}

@@ -173,7 +173,6 @@ func (s *State) gopush() {
 			s.dataMut.Unlock()
 		}
 	}
-
 	//send this new change to each subscriber
 	s.connMut.Lock()
 	for _, c := range s.conns {

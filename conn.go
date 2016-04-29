@@ -1,6 +1,7 @@
 package velox
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,14 +23,15 @@ type Conn interface {
 	Close() error
 }
 
+//NOTE transport should only be used in this file!
 type transport interface {
-	connect(w http.ResponseWriter, r *http.Request, isConnected chan bool) error
+	connect(w http.ResponseWriter, r *http.Request, isConnected chan error) error
 	send(upd *update) error
 	close() error
 }
 
 type conn struct {
-	transport
+	transport  transport
 	state      *State
 	connected  bool
 	id         string
@@ -61,11 +63,64 @@ func (c *conn) Push() {
 
 //Force close the connection.
 func (c *conn) Close() error {
-	return c.transport.close()
+	if c.transport != nil {
+		err := c.transport.close()
+		c.connected = false
+		c.transport = nil
+		return err
+	}
+	return nil
+}
+
+//connect using the provided transport
+//and block until successfully connected
+func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
+	//choose transport
+	if r.Header.Get("Accept") == "text/event-stream" {
+		c.transport = &evtSrcTrans{}
+	} else if r.Header.Get("Upgrade") == "websocket" {
+		c.transport = &wsTrans{}
+	} else {
+		return fmt.Errorf("Invalid sync request")
+	}
+	//connect to client over set transport
+	c.waiter.Add(1)
+	isConnected := make(chan error)
+	go func() {
+		//connect, and then:
+		// * send on channel success/failed connection
+		// * return when disconnected
+		if err := c.transport.connect(w, r, isConnected); err != nil {
+			//transport error after connection TODO(jpillora): log optionally
+		}
+		//disconnected, done waiting
+		c.Close()
+		c.waiter.Done()
+	}()
+	//wait here until transport completes connection
+	if err := <-isConnected; err != nil {
+		return err
+	}
+	//once successfully connected, ping loop (every 25s, browser timesout after 30s)
+	c.connected = true
+	go func() {
+		for {
+			time.Sleep(25 * time.Second)
+			if !c.connected {
+				return
+			}
+			c.send(&update{Ping: true})
+		}
+	}()
+	//now connected, consumer should connection.Wait()
+	return nil
 }
 
 //send to connection, ensure only 1 concurrent sender
 func (c *conn) send(upd *update) error {
+	if !c.Connected() {
+		return errors.New("not connected")
+	}
 	c.sendingMut.Lock()
 	defer c.sendingMut.Unlock()
 	return c.transport.send(upd)
@@ -85,13 +140,14 @@ type wsTrans struct {
 	conn *websocket.Conn
 }
 
-func (ws *wsTrans) connect(w http.ResponseWriter, r *http.Request, isConnected chan bool) error {
+func (ws *wsTrans) connect(w http.ResponseWriter, r *http.Request, isConnected chan error) error {
 	conn, err := defaultUpgrader.Upgrade(w, r, nil)
 	if err != nil {
+		isConnected <- err
 		return fmt.Errorf("cannot upgrade connection: %s", err)
 	}
 	ws.conn = conn
-	isConnected <- true
+	isConnected <- nil
 	//block on connection
 	for {
 		//msgType, msgBytes, err
@@ -123,7 +179,7 @@ type evtSrcTrans struct {
 //watch when connection is ready
 type evtSrcWriter struct {
 	isFlushed   bool
-	isConnected chan bool
+	isConnected chan error
 	http.ResponseWriter
 }
 
@@ -131,10 +187,10 @@ func (ew *evtSrcWriter) CloseNotify() <-chan bool {
 	return ew.ResponseWriter.(http.CloseNotifier).CloseNotify()
 }
 
-//HACK: uses eventsource's call to flush as a signal, that its connected
+//HACK: uses eventsource's call to flush as a signal that its connected
 func (ew *evtSrcWriter) Flush() {
 	if !ew.isFlushed {
-		ew.isConnected <- true
+		ew.isConnected <- nil
 	}
 	ew.isFlushed = true
 	f, ok := ew.ResponseWriter.(http.Flusher)
@@ -143,7 +199,7 @@ func (ew *evtSrcWriter) Flush() {
 	}
 }
 
-func (es *evtSrcTrans) connect(w http.ResponseWriter, r *http.Request, isConnected chan bool) error {
+func (es *evtSrcTrans) connect(w http.ResponseWriter, r *http.Request, isConnected chan error) error {
 	es.s = eventsource.NewServer()
 	if !strings.Contains(w.Header().Get("Content-Encoding"), "gzip") {
 		es.s.Gzip = true
