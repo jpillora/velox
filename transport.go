@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/donovanhide/eventsource"
 	"github.com/gorilla/websocket"
@@ -41,6 +42,8 @@ func (ws *wsTransport) connect(w http.ResponseWriter, r *http.Request, connectin
 	//block on connection
 	for {
 		//msgType, msgBytes, err
+		conn.SetReadDeadline(time.Now().Add(35 * time.Second))
+		//should receive pings at an interval
 		if _, _, err := conn.ReadMessage(); err != nil {
 			if err == io.EOF {
 				break
@@ -52,6 +55,7 @@ func (ws *wsTransport) connect(w http.ResponseWriter, r *http.Request, connectin
 }
 
 func (ws *wsTransport) send(upd *update) error {
+	ws.conn.SetWriteDeadline(time.Now().Add(35 * time.Second))
 	return ws.conn.WriteJSON(upd)
 }
 
