@@ -27,21 +27,22 @@ type State struct {
 	//configuration
 	Throttle time.Duration `json:"-"`
 	//internal state
-	id       string
 	initMut  sync.Mutex
 	initd    bool
 	gostruct interface{}
-	dataMut  sync.RWMutex //protects bytes/delta/version
-	bytes    []byte
-	delta    []byte
-	version  int64
 	connMut  sync.Mutex
 	conns    map[string]*conn
-	push     struct {
+	data     struct {
+		mut     sync.RWMutex
+		id      string
+		bytes   []byte
+		delta   []byte
+		version int64
+	}
+	push struct {
 		mut    sync.Mutex
 		ing    uint32
 		queued uint32
-		start  time.Time
 		wg     sync.WaitGroup
 	}
 }
@@ -54,14 +55,14 @@ func (s *State) init(gostruct interface{}) error {
 	if b, err := json.Marshal(gostruct); err != nil {
 		return fmt.Errorf("JSON marshalling failed: %s", err)
 	} else {
-		s.bytes = b
+		s.data.bytes = b
 	}
 	id := make([]byte, 4)
 	if n, _ := rand.Read(id); n > 0 {
-		s.id = hex.EncodeToString(id)
+		s.data.id = hex.EncodeToString(id)
 	}
 	s.gostruct = gostruct
-	s.version = 1
+	s.data.version = 1
 	s.conns = map[string]*conn{}
 	s.initd = true
 	return nil
@@ -69,13 +70,13 @@ func (s *State) init(gostruct interface{}) error {
 
 //ID uniquely identifies this state object
 func (s *State) ID() string {
-	return s.id
+	return s.data.id
 }
 
 //Version of this state object (when the underlying struct is
 //and a Push is performed, this version number is incremented).
 func (s *State) Version() int64 {
-	return s.version
+	return s.data.version
 }
 
 func (s *State) sync(gostruct interface{}) (*State, error) {
@@ -114,7 +115,7 @@ func (s *State) NumConnections() int {
 
 //Send the changes from this object to all connected clients.
 //Push is thread-safe and is throttled so it can be called
-//with abandon. Returns false if a Push has already been queued.
+//with abandon. Returns false if a Push in progress.
 func (s *State) Push() bool {
 	//attempt to mark state as 'pushing'
 	if atomic.CompareAndSwapUint32(&s.push.ing, 0, 1) {
@@ -129,22 +130,20 @@ func (s *State) Push() bool {
 //non-blocking push
 func (s *State) gopush() {
 	s.push.mut.Lock()
-	s.push.start = time.Now()
+	t0 := time.Now()
 	//queue cleanup
 	defer func() {
 		//measure time passed, ensure we wait at least Throttle time
-		tdelta := time.Now().Sub(s.push.start)
+		tdelta := time.Now().Sub(t0)
 		if t := s.Throttle - tdelta; t > 0 {
 			time.Sleep(t)
 		}
-		//mark not 'pushing'
+		//push complete
+		s.push.mut.Unlock()
 		atomic.StoreUint32(&s.push.ing, 0)
-		//cleanup
+		//if queued, auto-push again
 		if atomic.CompareAndSwapUint32(&s.push.queued, 1, 0) {
-			s.push.mut.Unlock()
-			s.Push() //auto-push when queued
-		} else {
-			s.push.mut.Unlock()
+			s.Push()
 		}
 	}()
 	//calculate new json state
@@ -161,22 +160,22 @@ func (s *State) gopush() {
 		return
 	}
 	//if changed, then calculate change set
-	if !bytes.Equal(s.bytes, newBytes) {
+	if !bytes.Equal(s.data.bytes, newBytes) {
 		//calculate change set from last version
-		ops, _ := jsonpatch.CreatePatch(s.bytes, newBytes)
-		if len(s.bytes) > 0 && len(ops) > 0 {
+		ops, _ := jsonpatch.CreatePatch(s.data.bytes, newBytes)
+		if len(s.data.bytes) > 0 && len(ops) > 0 {
 			//changes! bump version
-			s.dataMut.Lock()
-			s.delta, _ = json.Marshal(ops)
-			s.bytes = newBytes
-			s.version++
-			s.dataMut.Unlock()
+			s.data.mut.Lock()
+			s.data.delta, _ = json.Marshal(ops)
+			s.data.bytes = newBytes
+			s.data.version++
+			s.data.mut.Unlock()
 		}
 	}
 	//send this new change to each subscriber
 	s.connMut.Lock()
 	for _, c := range s.conns {
-		if c.version != s.version {
+		if c.version != s.data.version {
 			s.push.wg.Add(1)
 			go func(c *conn) {
 				s.pushTo(c)
@@ -191,32 +190,33 @@ func (s *State) gopush() {
 }
 
 func (s *State) pushTo(c *conn) {
-	if c.version == s.version {
+	if c.version == s.data.version {
 		return
 	}
-	update := &update{
-		Version: s.version,
-	}
-	s.dataMut.RLock()
+	s.data.mut.RLock()
+	update := &update{Version: s.data.version}
 	//first push? include id
 	if atomic.CompareAndSwapUint32(&c.first, 0, 1) {
-		update.ID = s.id
+		update.ID = s.data.id
 	}
 	//choose optimal update (send the smallest)
-	if s.delta != nil && c.version == (s.version-1) && len(s.bytes) > 0 && len(s.delta) < len(s.bytes) {
+	if s.data.delta != nil &&
+		c.version == (s.data.version-1) &&
+		len(s.data.bytes) > 0 &&
+		len(s.data.delta) < len(s.data.bytes) {
 		update.Delta = true
-		update.Body = s.delta
+		update.Body = s.data.delta
 	} else {
 		update.Delta = false
-		update.Body = s.bytes
+		update.Body = s.data.bytes
 	}
-	s.dataMut.RUnlock()
+	s.data.mut.RUnlock()
 	//send update
 	if err := c.send(update); err == nil {
 		//on success, update client version
-		s.dataMut.RLock()
-		c.version = s.version
-		s.dataMut.RUnlock()
+		s.data.mut.RLock()
+		c.version = s.data.version
+		s.data.mut.RUnlock()
 	}
 }
 

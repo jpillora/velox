@@ -16,7 +16,7 @@ const debug = false
 
 type Foo struct {
 	velox.State    //adds sync state and a Push() method
-	sync.Mutex     //optionally add locking to help prevent race conditions (foo.Push will make user of the sync.Locker interface)
+	sync.Mutex     //optionally add locking to help prevent race conditions (foo.Push will make use of the sync.Locker interface)
 	NumConnections int
 	NumGoRoutines  int     `json:",omitempty"`
 	AllocMem       float64 `json:",omitempty"`
