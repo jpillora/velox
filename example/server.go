@@ -125,7 +125,7 @@ v.onchange = function(isConnected) {
 <!-- example -->
 <div><b id="isconnected">disconnected</b></div>
 <pre id="example"></pre>
-<script src="/velox.js"></script>
+<script src="/velox.js?dev=1"></script>
 <script>
 var foo = {};
 var v = velox.sse("/sync", foo);

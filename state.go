@@ -211,12 +211,26 @@ func (s *State) pushTo(c *conn) {
 		update.Body = s.data.bytes
 	}
 	s.data.mut.RUnlock()
-	//send update
-	if err := c.send(update); err == nil {
-		//on success, update client version
-		s.data.mut.RLock()
-		c.version = s.data.version
-		s.data.mut.RUnlock()
+	//send!
+	sent := make(chan error)
+	go func() {
+		sent <- c.send(update)
+	}()
+	//wait for timeout or sent
+	select {
+	case err := <-sent:
+		//success?
+		if err == nil {
+			//on success, update client version
+			s.data.mut.RLock()
+			c.version = s.data.version
+			s.data.mut.RUnlock()
+		} else {
+			c.Close()
+		}
+	case <-time.After(30 * time.Second):
+		//timeout
+		c.Close()
 	}
 }
 

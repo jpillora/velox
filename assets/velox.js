@@ -1,7 +1,13 @@
 /* global window,WebSocket */
 (function(window, document) {
-  //velox protocol version
-  var proto = "v2";
+  //"consts"
+  var PROTO_VERISON = "v2";
+  var PING_IN_INTERVAL = 45 * 1000;
+  var PING_OUT_INTERVAL = 30 * 1000;
+  var TIME_IN_INTERVAL = 5 * 1000;
+  var TIME_OUT_INTERVAL = 30 * 1000;
+  var MAX_RETRY_DELAY = 30 * 1000;
+  var OPEN = 1;
   //public method
   var velox = function(url, obj) {
     if(velox.DEFAULT === velox.WS && window.WebSocket)
@@ -17,7 +23,7 @@
   velox.sse = function(url, obj) {
     return new Velox(velox.SSE, url, obj)
   };
-  velox.proto = proto;
+  velox.proto = PROTO_VERISON;
   velox.online = true;
   //global status change handler
   //performs instant retries when the users
@@ -110,7 +116,7 @@
       var params = [];
       if(this.version) params.push("v="+this.version);
       if(this.id) params.push("id="+this.id);
-      if(params.length) url += (/\?/.test(this.url) ? "&" : "?") + params.join("&");
+      if(params.length) url += (/\?/.test(url) ? "&" : "?") + params.join("&");
       //connect!
       if(this.ws) {
         this.conn = new WebSocket(url);
@@ -121,7 +127,6 @@
       events.forEach(function(e) {
         _this.conn["on"+e] = _this["conn"+e].bind(_this);
       });
-      this.pingout.t = setInterval(this.pingout.bind(this), 30 * 1000);
       this.sleepCheck.last = null;
       this.sleepCheck();
     },
@@ -151,34 +156,29 @@
         return this.conn.send(data);
       }
     },
+    pingin: function() {
+      //ping receievd by server, reset last timer, start death timer for 45secs
+      clearTimeout(this.pingin.t);
+      this.pingin.t = setTimeout(this.retry.bind(this), PING_IN_INTERVAL);
+    },
     pingout: function() {
       this.send("ping");
-    },
-    pingin: function() {
-      //ping receievd by server, reset last timer, start death timer for 30secs
-      clearTimeout(this.pingin.t);
-      this.pingin.t = setTimeout(this.retry.bind(this), 30 * 1000);
+      clearTimeout(this.pingout.t);
+      this.pingout.t = setTimeout(this.pingout.bind(this), PING_OUT_INTERVAL);
     },
     sleepCheck: function() {
       var data = this.sleepCheck;
       clearInterval(data.t);
       var now = Date.now();
       //should be ~5secs, over ~30sec - assume woken from sleep
-      var woken = data.last && (now - data.last) > 30*1000;
+      var woken = data.last && (now - data.last) > TIME_OUT_INTERVAL;
       data.last = now;
-      data.t = setTimeout(this.sleepCheck.bind(this), 5*1000);
+      data.t = setTimeout(this.sleepCheck.bind(this), TIME_IN_INTERVAL);
       if(woken) this.retry();
     },
     statusCheck: function(err) {
       var curr = !!this.connected;
-      var next = undefined;
-      var c = this.conn;
-      if(c && (c instanceof EventSource && c.readyState === EventSource.OPEN) ||
-            (c instanceof WebSocket && c.readyState === WebSocket.OPEN)) {
-        next = true;
-      } else {
-        next = false;
-      }
+      var next = !!(this.conn && this.conn.readyState === OPEN);
       if(curr !== next) {
         this.connected = next;
         this.onchange(this.connected);
@@ -224,18 +224,27 @@
     connopen: function() {
       this.statusCheck();
       this.pingin(); //treat initial connection as incoming ping
+      this.pingout(); //send initial ping
     },
     connclose: function() {
       this.statusCheck();
       //backoff retry connection
-      this.delay *= 2;
+      this.delay = Math.min(MAX_RETRY_DELAY, this.delay*2);
       if(this.retrying && velox.online) {
         this.retry.t = setTimeout(this.connect.bind(this), this.delay);
       }
     },
     connerror: function(err) {
-      this.statusCheck();
-      this.onerror(err);
+      if(this.conn && this.conn instanceof EventSource) {
+        //eventsource has no close event - instead it has its
+        //own retry mechanism. lets scrap that and simulate a close,
+        //to use velox backoff retries.
+        this.conn.close();
+        this.connclose();
+      } else {
+        this.statusCheck();
+        this.onerror(err);
+      }
     }
   };
   //publicise
