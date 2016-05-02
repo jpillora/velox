@@ -1,4 +1,4 @@
-// velox - v0.2.8 - https://github.com/jpillora/velox
+// velox - v0.2.9 - https://github.com/jpillora/velox
 // Jaime Pillora <dev@jpillora.com> - MIT Copyright 2016
 (function() {
 ;(function (global) {
@@ -593,7 +593,6 @@ if (typeof exports !== "undefined") {
   var TIME_IN_INTERVAL = 5 * 1000;
   var TIME_OUT_INTERVAL = 30 * 1000;
   var MAX_RETRY_DELAY = 30 * 1000;
-  var OPEN = 1;
   //public method
   var velox = function(url, obj) {
     if(velox.DEFAULT === velox.WS && window.WebSocket)
@@ -724,22 +723,23 @@ if (typeof exports !== "undefined") {
     },
     cleanup: function() {
       clearTimeout(this.pingout.t);
-      if(!this.conn)
+      if(!this.conn) {
         return;
+      }
       var c = this.conn;
       this.conn = null;
       events.forEach(function(e) {
         c["on"+e] = null;
       });
-      if(c && (c instanceof EventSource && c.readyState !== EventSource.CLOSED) ||
-          (c instanceof WebSocket && c.readyState !== WebSocket.CLOSED)) {
+      if(c && c.readyState !== c.CLOSED) {
         c.close();
       }
       this.statusCheck();
     },
     send: function(data) {
-      if(this.conn && this.conn instanceof WebSocket && this.conn.readyState === WebSocket.OPEN) {
-        return this.conn.send(data);
+      var c = this.conn;
+      if(c && c instanceof WebSocket && c.readyState === c.OPEN) {
+        return c.send(data);
       }
     },
     pingin: function() {
@@ -764,7 +764,7 @@ if (typeof exports !== "undefined") {
     },
     statusCheck: function(err) {
       var curr = !!this.connected;
-      var next = !!(this.conn && this.conn.readyState === OPEN);
+      var next = !!(this.conn && this.conn.readyState === this.conn.OPEN);
       if(curr !== next) {
         this.connected = next;
         this.onchange(this.connected);

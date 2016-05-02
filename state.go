@@ -18,14 +18,16 @@ import (
 
 var (
 	//15ms is approximately highest resolution on the JS eventloop
-	MinThrottle     = 15 * time.Millisecond
-	DefaultThrottle = 200 * time.Millisecond
+	MinThrottle        = 15 * time.Millisecond
+	DefaultThrottle    = 200 * time.Millisecond
+	DefaultSendTimeout = 30 * time.Second
 )
 
 //State must be embedded into a struct to make it syncable.
 type State struct {
 	//configuration
-	Throttle time.Duration `json:"-"`
+	Throttle    time.Duration `json:"-"`
+	SendTimeout time.Duration `json:"-"`
 	//internal state
 	initMut  sync.Mutex
 	initd    bool
@@ -50,6 +52,9 @@ type State struct {
 func (s *State) init(gostruct interface{}) error {
 	if s.Throttle < MinThrottle {
 		s.Throttle = DefaultThrottle
+	}
+	if s.SendTimeout == 0 {
+		s.SendTimeout = DefaultSendTimeout
 	}
 	//get initial JSON bytes and confirm gostruct is marshallable
 	if b, err := json.Marshal(gostruct); err != nil {
@@ -228,7 +233,7 @@ func (s *State) pushTo(c *conn) {
 		} else {
 			c.Close()
 		}
-	case <-time.After(30 * time.Second):
+	case <-time.After(s.SendTimeout):
 		//timeout
 		c.Close()
 	}
