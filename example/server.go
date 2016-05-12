@@ -4,6 +4,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	// _ "net/http/pprof"
 	"os"
 	"runtime"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"github.com/jpillora/velox"
 )
 
+//debug enables goroutine and memory counters
 const debug = false
 
 type Foo struct {
@@ -66,7 +68,6 @@ func main() {
 			time.Sleep(250 * time.Millisecond)
 		}
 	}()
-
 	//show memory/goroutine stats
 	if debug {
 		go func() {
@@ -83,7 +84,6 @@ func main() {
 			}
 		}()
 	}
-
 	//sync handlers
 	http.Handle("/velox.js", velox.JS)
 	http.Handle("/sync", velox.SyncHandler(foo))
@@ -102,40 +102,43 @@ func main() {
 }
 
 var indexhtml = []byte(`
-
 <!-- documentation -->
-<pre id="code">
-&lt;div>&lt;b id="isconnected">disconnected&lt;/b>&lt;/div>
+Client:<br>
+<pre id="code">Status: &lt;div>&lt;b id="status">disconnected&lt;/b>&lt;/div>
 &lt;pre id="example">&lt;/pre>
 &lt;script src="/velox.js">&lt;/script>
 &lt;script>
 var foo = {};
 var v = velox("/sync", foo);
-v.onupdate = function() {
-	example.innerHTML = JSON.stringify(foo, null, 2);
-};
 v.onchange = function(isConnected) {
-	isconnected.innerHTML = isConnected ? "connected" : "disconnected";
-}
+	document.querySelector("#status").innerHTML = isConnected ? "connected" : "disconnected";
+};
+v.onupdate = function() {
+	document.querySelector("#example").innerHTML = JSON.stringify(foo, null, 2);
+};
 &lt;/script>
 </pre>
 <a href="https://github.com/jpillora/velox"><img style="position: absolute; z-index: 2; top: 0; right: 0; border: 0;" src="https://s3.amazonaws.com/github/ribbons/forkme_right_darkblue_121621.png" alt="Fork me on GitHub"></a>
 <hr>
 
+Server:<br>
+<a href="https://github.com/jpillora/velox/blob/master/example/server.go" target="_blank">
+	https://github.com/jpillora/velox/blob/master/example/server.go
+</a>
+<hr>
+
 <!-- example -->
-<div><b id="isconnected">disconnected</b></div>
+<div>Status: <b id="status">disconnected</b></div>
 <pre id="example"></pre>
 <script src="/velox.js?dev=1"></script>
 <script>
 var foo = {};
-var v = velox.sse("/sync", foo);
-v.onupdate = function() {
-	example.innerHTML = JSON.stringify(foo, null, 2);
-};
+var v = velox("/sync", foo);
 v.onchange = function(isConnected) {
-	isconnected.innerHTML = isConnected ? "connected" : "disconnected";
-}
+	document.querySelector("#status").innerHTML = isConnected ? "connected" : "disconnected";
+};
+v.onupdate = function() {
+	document.querySelector("#example").innerHTML = JSON.stringify(foo, null, 2);
+};
 </script>
 `)
-
-//NOTE: deltas are not sent in the example since the target object is too small

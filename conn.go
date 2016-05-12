@@ -1,6 +1,7 @@
 package velox
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -75,20 +76,8 @@ func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 	} else {
 		return fmt.Errorf("Invalid sync request")
 	}
-	//connect to client over set transport
-	connectingCh := make(chan error)
-	go func() {
-		//connect, and then:
-		// * send on channel success/failed connection
-		// * return when disconnected
-		if err := c.transport.connect(w, r, connectingCh); err != nil {
-			//transport error after connection TODO(jpillora): log optionally
-		}
-		//disconnected
-		close(c.connectedCh)
-	}()
-	//wait here until transport completes connection
-	if err := <-connectingCh; err != nil {
+	//non-blocking connect to client over set transport
+	if err := c.transport.connect(w, r); err != nil {
 		return err
 	}
 	//successfully connected
@@ -98,21 +87,46 @@ func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 		for {
 			select {
 			case <-time.After(25 * time.Second):
-				c.send(&update{Ping: true})
+				if err := c.send(&update{Ping: true}, c.state.SendTimeout); err != nil {
+					goto disconnected
+				}
 			case <-c.connectedCh:
-				c.connected = false
-				c.Close()
-				return
+				goto disconnected
 			}
 		}
+	disconnected:
+		c.connected = false
+		c.Close()
+	}()
+	//non-blocking wait on connection
+	go func() {
+		if err := c.transport.wait(); err != nil {
+			//log error?
+		}
+		close(c.connectedCh)
 	}()
 	//now connected, consumer can connection.Wait()
 	return nil
 }
 
 //send to connection, ensure only 1 concurrent sender
-func (c *conn) send(upd *update) error {
+func (c *conn) send(upd *update, timeout time.Duration) error {
 	c.sendingMut.Lock()
 	defer c.sendingMut.Unlock()
-	return c.transport.send(upd)
+	//send
+	sent := make(chan error)
+	go func() {
+		sent <- c.transport.send(upd)
+	}()
+	//wait for timeout or sent
+	select {
+	case err := <-sent:
+		if err != nil {
+			return err
+		}
+	case <-time.After(timeout):
+		//timeout
+		return errors.New("send timed out")
+	}
+	return nil
 }

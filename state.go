@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -195,10 +194,11 @@ func (s *State) gopush() {
 }
 
 func (s *State) pushTo(c *conn) {
+	s.data.mut.RLock()
 	if c.version == s.data.version {
+		s.data.mut.RUnlock()
 		return
 	}
-	s.data.mut.RLock()
 	update := &update{Version: s.data.version}
 	//first push? include id
 	if atomic.CompareAndSwapUint32(&c.first, 0, 1) {
@@ -217,41 +217,12 @@ func (s *State) pushTo(c *conn) {
 	}
 	s.data.mut.RUnlock()
 	//send!
-	sent := make(chan error)
-	go func() {
-		sent <- c.send(update)
-	}()
-	//wait for timeout or sent
-	select {
-	case err := <-sent:
-		//success?
-		if err == nil {
-			//on success, update client version
-			s.data.mut.RLock()
-			c.version = s.data.version
-			s.data.mut.RUnlock()
-		} else {
-			c.Close()
-		}
-	case <-time.After(s.SendTimeout):
-		//timeout
+	if err := c.send(update, s.SendTimeout); err != nil {
 		c.Close()
+		return
 	}
-}
-
-//A single update. May contain compression flags in future.
-type update struct {
-	ID      string          `json:"id,omitempty"`
-	Ping    bool            `json:"ping,omitempty"`
-	Delta   bool            `json:"delta,omitempty"`
-	Version int64           `json:"version,omitempty"` //53 usable bits
-	Body    json.RawMessage `json:"body,omitempty"`
-}
-
-//implement eventsource.Event interface
-func (u *update) Id() string    { return strconv.FormatInt(u.Version, 10) }
-func (u *update) Event() string { return "" }
-func (u *update) Data() string {
-	b, _ := json.Marshal(u)
-	return string(b)
+	//on success, update client version
+	s.data.mut.RLock()
+	c.version = s.data.version
+	s.data.mut.RUnlock()
 }

@@ -1,4 +1,4 @@
-// velox - v0.2.9 - https://github.com/jpillora/velox
+// velox - v0.2.10 - https://github.com/jpillora/velox
 // Jaime Pillora <dev@jpillora.com> - MIT Copyright 2016
 (function() {
 ;(function (global) {
@@ -595,16 +595,16 @@ if (typeof exports !== "undefined") {
   var MAX_RETRY_DELAY = 30 * 1000;
   //public method
   var velox = function(url, obj) {
-    if(velox.DEFAULT === velox.WS && window.WebSocket)
-      return velox.ws(url, obj);
-    else
+    if(velox.DEFAULT === velox.SSE || !window.WebSocket)
       return velox.sse(url, obj);
+    else
+      return velox.ws(url, obj);
   };
-  velox.WS = velox.DEFAULT = {ws:true};
+  velox.WS = {ws:true};
   velox.ws = function(url, obj) {
     return new Velox(velox.WS, url, obj)
   };
-  velox.SSE = {sse:true};
+  velox.SSE = velox.DEFAULT = {sse:true};
   velox.sse = function(url, obj) {
     return new Velox(velox.SSE, url, obj)
   };

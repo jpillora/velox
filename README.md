@@ -95,7 +95,6 @@ See this [simple `example/`](example/) and view it live here: https://velox.jpil
 
 * Object synchronization is currently one way (server to client) only.
 * Object diff has not been optimized. It is a simple property-by-property comparison. :warning: Performance testing has not been done yet.
-* The demo page is behind CloudFlare so it must use [SSE](https://en.wikipedia.org/wiki/Server-sent_events), as CloudFlare does not support [WS](https://en.wikipedia.org/wiki/WebSocket) on their free plans.
 
 <!--
 ### Improvements

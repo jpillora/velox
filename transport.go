@@ -1,19 +1,31 @@
 package velox
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
+	"strconv"
 	"time"
 
-	"github.com/donovanhide/eventsource"
+	"github.com/bernerdschaefer/eventsource"
 	"github.com/gorilla/websocket"
 )
 
+//a single update
+type update struct {
+	ID      string          `json:"id,omitempty"`
+	Ping    bool            `json:"ping,omitempty"`
+	Delta   bool            `json:"delta,omitempty"`
+	Version int64           `json:"version,omitempty"` //53 usable bits
+	Body    json.RawMessage `json:"body,omitempty"`
+}
+
 type transport interface {
-	connect(w http.ResponseWriter, r *http.Request, connectingCh chan error) error
+	connect(w http.ResponseWriter, r *http.Request) error
 	send(upd *update) error
+	wait() error
 	close() error
 }
 
@@ -31,24 +43,12 @@ type wsTransport struct {
 	conn *websocket.Conn
 }
 
-func (ws *wsTransport) connect(w http.ResponseWriter, r *http.Request, connectingCh chan error) error {
+func (ws *wsTransport) connect(w http.ResponseWriter, r *http.Request) error {
 	conn, err := defaultUpgrader.Upgrade(w, r, nil)
 	if err != nil {
-		connectingCh <- err
 		return fmt.Errorf("cannot upgrade connection: %s", err)
 	}
 	ws.conn = conn
-	connectingCh <- nil
-	//block on connection
-	for {
-		//msgType, msgBytes, err
-		if _, _, err := conn.ReadMessage(); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return err
-		}
-	}
 	return nil
 }
 
@@ -57,6 +57,18 @@ func (ws *wsTransport) send(upd *update) error {
 	return ws.conn.WriteJSON(upd)
 }
 
+func (ws *wsTransport) wait() error {
+	//block on connection
+	for {
+		//msgType, msgBytes, err
+		if _, _, err := ws.conn.ReadMessage(); err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+	}
+}
 func (ws *wsTransport) close() error {
 	return ws.conn.Close()
 }
@@ -64,51 +76,57 @@ func (ws *wsTransport) close() error {
 //=========================
 
 type evtSrcTransport struct {
-	s *eventsource.Server
+	enc         *eventsource.Encoder
+	isConnected bool
+	connected   chan struct{}
 }
 
-//evtSrcWriter is a hack to
-//watch when connection is ready
-type evtSrcWriter struct {
-	isFlushed    bool
-	connectingCh chan error
-	http.ResponseWriter
-}
-
-func (ew *evtSrcWriter) CloseNotify() <-chan bool {
-	return ew.ResponseWriter.(http.CloseNotifier).CloseNotify()
-}
-
-//HACK: uses eventsource's call to flush as a signal that its connected
-func (ew *evtSrcWriter) Flush() {
-	if !ew.isFlushed {
-		ew.connectingCh <- nil
+func (es *evtSrcTransport) connect(w http.ResponseWriter, r *http.Request) error {
+	notifier, ok := w.(http.CloseNotifier)
+	if !ok {
+		return errors.New("underlying writer must be an http.CloseNotifier")
 	}
-	ew.isFlushed = true
-	f, ok := ew.ResponseWriter.(http.Flusher)
-	if ok {
-		f.Flush()
-	}
-}
-
-func (es *evtSrcTransport) connect(w http.ResponseWriter, r *http.Request, connectingCh chan error) error {
-	es.s = eventsource.NewServer()
-	if !strings.Contains(w.Header().Get("Content-Encoding"), "gzip") {
-		es.s.Gzip = true
-	}
-	ew := &evtSrcWriter{false, connectingCh, w}
-	es.s.Handler("events").ServeHTTP(ew, r)
+	//connection controls
+	es.isConnected = true
+	es.connected = make(chan struct{})
+	go func() {
+		select {
+		case <-es.connected:
+		case <-notifier.CloseNotify(): //client disconnected early
+			es.close()
+		}
+	}()
+	//eventsource headers
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Vary", "Accept")
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	//connection is now expecting a stream of events
+	es.enc = eventsource.NewEncoder(w)
 	return nil
 }
 
 func (es *evtSrcTransport) send(upd *update) error {
-	es.s.Publish([]string{"events"}, upd)
+	b, err := json.Marshal(upd)
+	if err != nil {
+		return err
+	}
+	return es.enc.Encode(eventsource.Event{
+		ID:   strconv.FormatInt(upd.Version, 10),
+		Data: b,
+	})
+}
+
+func (es *evtSrcTransport) wait() error {
+	<-es.connected
 	return nil
 }
 
 func (es *evtSrcTransport) close() error {
-	if es.s != nil {
-		es.s.Close()
+	if es.isConnected {
+		//unblocking the wait, causes the http handler to return
+		close(es.connected)
+		es.isConnected = false
 	}
 	return nil
 }
