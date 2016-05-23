@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 
 	"github.com/jpillora/velox/assets"
 )
@@ -28,6 +29,8 @@ func SyncHandler(gostruct interface{}) http.Handler {
 	})
 }
 
+var connectionID int64
+
 //Sync upgrades a given HTTP connection into a WebSocket connection and synchronises
 //the provided struct with the client. velox takes responsibility for writing the response
 //in the event of failure. Default handlers close the TCP connection on return so when
@@ -51,7 +54,7 @@ func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, e
 		}
 	}
 	//set initial connection state
-	conn := newConn(r.RemoteAddr, state, version)
+	conn := newConn(atomic.AddInt64(&connectionID, 1), r.RemoteAddr, state, version)
 	//attempt connection over transport
 	//(negotiate websockets / start eventsource emitter)
 	//return when connected

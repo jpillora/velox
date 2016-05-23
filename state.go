@@ -32,10 +32,10 @@ type State struct {
 	initd    bool
 	gostruct interface{}
 	connMut  sync.Mutex
-	conns    map[string]*conn
+	conns    map[int64]*conn
 	data     struct {
 		mut     sync.RWMutex
-		id      string
+		id      string //data id != conn id
 		bytes   []byte
 		delta   []byte
 		version int64
@@ -67,7 +67,7 @@ func (s *State) init(gostruct interface{}) error {
 	}
 	s.gostruct = gostruct
 	s.data.version = 1
-	s.conns = map[string]*conn{}
+	s.conns = map[int64]*conn{}
 	s.initd = true
 	return nil
 }

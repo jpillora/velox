@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -23,17 +24,19 @@ type conn struct {
 	state       *State
 	connected   bool
 	connectedCh chan struct{}
-	id          string
+	id          int64
+	addr        string
 	first       uint32
 	uptime      time.Time
 	version     int64
 	sendingMut  sync.Mutex
 }
 
-func newConn(id string, state *State, version int64) *conn {
+func newConn(id int64, addr string, state *State, version int64) *conn {
 	return &conn{
 		connectedCh: make(chan struct{}),
 		id:          id,
+		addr:        addr,
 		state:       state,
 		version:     version,
 	}
@@ -41,7 +44,7 @@ func newConn(id string, state *State, version int64) *conn {
 
 //ID of this connection
 func (c *conn) ID() string {
-	return c.id
+	return strconv.FormatInt(c.id, 10)
 }
 
 //Status of this connection, should be true initially, then false after Wait().
