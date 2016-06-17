@@ -83,6 +83,10 @@ func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 	if err := c.transport.connect(w, r); err != nil {
 		return err
 	}
+	//initial ping
+	if err := c.send(&update{Ping: true}, c.state.SendTimeout); err != nil {
+		return fmt.Errorf("Failed to send initial event")
+	}
 	//successfully connected
 	c.connected = true
 	//while connected, ping loop (every 25s, browser timesout after 30s)
