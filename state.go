@@ -98,15 +98,17 @@ func (s *State) sync(gostruct interface{}) (*State, error) {
 
 func (s *State) subscribe(conn *conn) {
 	//subscribe
+	conn.waiter.Add(1)
 	s.connMut.Lock()
 	s.conns[conn.id] = conn
 	s.connMut.Unlock()
 	//and then unsubscribe on close
 	go func() {
-		conn.Wait()
+		<-conn.connectedCh //this unblocks before wait
 		s.connMut.Lock()
 		delete(s.conns, conn.id)
 		s.connMut.Unlock()
+		conn.waiter.Done()
 	}()
 }
 

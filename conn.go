@@ -24,6 +24,7 @@ type conn struct {
 	state       *State
 	connected   bool
 	connectedCh chan struct{}
+	waiter      sync.WaitGroup
 	id          int64
 	addr        string
 	first       uint32
@@ -54,7 +55,7 @@ func (c *conn) Connected() bool {
 
 //Wait will block until the connection is closed.
 func (c *conn) Wait() {
-	<-c.connectedCh
+	c.waiter.Wait()
 }
 
 //Push will the current state only to this client.
@@ -89,6 +90,7 @@ func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 	}
 	//successfully connected
 	c.connected = true
+	c.waiter.Add(1)
 	//while connected, ping loop (every 25s, browser timesout after 30s)
 	go func() {
 		for {
@@ -104,6 +106,8 @@ func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 	disconnected:
 		c.connected = false
 		c.Close()
+		//unblock waiters
+		c.waiter.Done()
 	}()
 	//non-blocking wait on connection
 	go func() {

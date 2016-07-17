@@ -2,6 +2,7 @@ package velox
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"sync/atomic"
@@ -23,7 +24,9 @@ type syncer interface {
 //or any other request-time checks.
 func SyncHandler(gostruct interface{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if conn, err := Sync(gostruct, w, r); err == nil {
+		if conn, err := Sync(gostruct, w, r); err != nil {
+			log.Printf("[velox] sync handler error: %s", err)
+		} else {
 			conn.Wait()
 		}
 	})
