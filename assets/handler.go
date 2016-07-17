@@ -6,33 +6,27 @@ import (
 	"bytes"
 	"compress/gzip"
 	"net/http"
-	"strconv"
 	"strings"
 )
 
-//embedded JS file
-var veloxJSDevelopBytes = MustAsset("dist/velox.js")
-var veloxJSBytes = MustAsset("dist/velox.min.js")
-var veloxJSBytesGzipped []byte
-
 var VeloxJS = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-	b := veloxJSBytes
+	path := "dist/velox.min.js"
 	if req.URL.Query().Get("dev") != "" {
-		b = veloxJSDevelopBytes
+		path = "dist/velox.js"
 	}
-	if strings.Contains(req.Header.Get("Accept-Encoding"), "gzip") {
-		//lazy compression
-		if veloxJSBytesGzipped == nil {
-			buff := bytes.Buffer{}
-			g := gzip.NewWriter(&buff)
-			g.Write(b)
-			g.Close()
-			veloxJSBytesGzipped = buff.Bytes()
-		}
-		b = veloxJSBytesGzipped
+	b, _ := Asset(path)
+	info, _ := AssetInfo(path)
+	//requested compression and not already compressed?
+	if strings.Contains(req.Header.Get("Accept-Encoding"), "gzip") && w.Header().Get("Content-Encoding") != "gzip" {
+		gb := bytes.Buffer{}
+		g := gzip.NewWriter(&gb)
+		g.Write(b)
+		g.Close()
+		b = gb.Bytes()
 		w.Header().Set("Content-Encoding", "gzip")
 	}
+	buff := bytes.NewReader(b)
+	//serve
 	w.Header().Set("Content-Type", "text/javascript")
-	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
-	w.Write(b)
+	http.ServeContent(w, req, info.Name(), info.ModTime(), buff)
 })
