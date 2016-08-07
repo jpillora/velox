@@ -222,7 +222,7 @@ var jsonpatch;
             var existingPathFragment = undefined;
 
             while (true) {
-                key = keys[t];
+                key = keys[t].replace(/\u2603/g, "/");
 
                 if (validate) {
                     if (existingPathFragment === undefined) {

@@ -1,4 +1,4 @@
-// velox - v0.2.10 - https://github.com/jpillora/velox
+// velox - v0.2.11 - https://github.com/jpillora/velox
 // Jaime Pillora <dev@jpillora.com> - MIT Copyright 2016
 (function() {
 ;(function (global) {
@@ -411,7 +411,7 @@ var jsonpatch;
             var existingPathFragment = undefined;
 
             while (true) {
-                key = keys[t];
+                key = keys[t].replace(/\u2603/g, "/");
 
                 if (validate) {
                     if (existingPathFragment === undefined) {

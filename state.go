@@ -12,8 +12,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/mattbaird/jsonpatch"
+	"github.com/jpillora/jsonpatch"
 )
+
+//Pusher implements a push method,
+//similar to Flush
+type Pusher interface {
+	Push() bool
+}
 
 var (
 	//15ms is approximately highest resolution on the JS eventloop

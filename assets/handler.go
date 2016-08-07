@@ -27,6 +27,5 @@ var VeloxJS = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 	}
 	buff := bytes.NewReader(b)
 	//serve
-	w.Header().Set("Content-Type", "text/javascript")
 	http.ServeContent(w, req, info.Name(), info.ModTime(), buff)
 })
