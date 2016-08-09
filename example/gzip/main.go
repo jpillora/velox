@@ -51,8 +51,8 @@ func main() {
 		w.Write(indexhtml)
 	})
 
-	//gzip has no effect on websocket connections
-	//and is manually performed on eventsource connections
+	//jpillora/gziphandler ignores websocket/eventsource connections
+	//and gzips the rest
 	gzippedRouter := gziphandler.GzipHandler(router)
 
 	//listen!

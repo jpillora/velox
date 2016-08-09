@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -100,9 +99,7 @@ type eventSourceTransport struct {
 }
 
 func (es *eventSourceTransport) connect(w http.ResponseWriter, r *http.Request) error {
-	//
-	acceptGzip := strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")
-	//
+	//hijack
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		return errors.New("underlying writer must be an http.Hijacker")
@@ -111,6 +108,8 @@ func (es *eventSourceTransport) connect(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		return errors.New("failed to hijack underlying net.Conn")
 	}
+	//can we gzip?
+	acceptGzip := strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")
 	//init
 	es.conn = conn
 	es.rw = rw
@@ -167,7 +166,6 @@ func (es *eventSourceTransport) close() error {
 	es.enc.Flush()
 	es.chunked.Close()
 	es.rw.Flush()
-	log.Printf("closedflushed")
 	return es.conn.Close()
 }
 
@@ -188,8 +186,8 @@ func (esb *eventSourceBuffer) Write(p []byte) (int, error) {
 func (esb *eventSourceBuffer) Flush() {
 	esb.es.conn.SetWriteDeadline(time.Now().Add(esb.es.writeTimeout))
 	io.Copy(esb.es.dst, &esb.buff)
-	// if esb.es.gw != nil {
-	// 	esb.es.gw.Flush()
-	// }
+	if esb.es.gw != nil {
+		esb.es.gw.Flush()
+	}
 	esb.es.rw.Flush()
 }

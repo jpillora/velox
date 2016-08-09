@@ -67,7 +67,7 @@ func main() {
 			//push to all connections
 			foo.Push()
 			//do other stuff...
-			time.Sleep(2500 * time.Millisecond)
+			time.Sleep(250 * time.Millisecond)
 		}
 	}()
 	//show memory/goroutine stats
@@ -102,7 +102,7 @@ func main() {
 	log.Printf("Listening on :%s...", port)
 	s := http.Server{
 		Addr: ":" + port,
-		//these will be ignored, see State.WriteTimeout
+		//these will be ignored by velox.SyncHandler, see State.WriteTimeout
 		ReadTimeout:  42 * time.Millisecond,
 		WriteTimeout: 42 * time.Millisecond,
 	}
