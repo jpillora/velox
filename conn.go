@@ -1,7 +1,6 @@
 package velox
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -74,9 +73,9 @@ func (c *conn) Close() error {
 func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 	//choose transport
 	if r.Header.Get("Accept") == "text/event-stream" {
-		c.transport = &evtSrcTransport{}
+		c.transport = &eventSourceTransport{writeTimeout: c.state.WriteTimeout}
 	} else if r.Header.Get("Upgrade") == "websocket" {
-		c.transport = &wsTransport{}
+		c.transport = &websocketsTransport{writeTimeout: c.state.WriteTimeout}
 	} else {
 		return fmt.Errorf("Invalid sync request")
 	}
@@ -85,7 +84,7 @@ func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	//initial ping
-	if err := c.send(&update{Ping: true}, c.state.SendTimeout); err != nil {
+	if err := c.send(&update{Ping: true}); err != nil {
 		return fmt.Errorf("Failed to send initial event")
 	}
 	//successfully connected
@@ -95,8 +94,8 @@ func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 	go func() {
 		for {
 			select {
-			case <-time.After(25 * time.Second):
-				if err := c.send(&update{Ping: true}, c.state.SendTimeout); err != nil {
+			case <-time.After(c.state.PingInterval):
+				if err := c.send(&update{Ping: true}); err != nil {
 					goto disconnected
 				}
 			case <-c.connectedCh:
@@ -121,23 +120,9 @@ func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 }
 
 //send to connection, ensure only 1 concurrent sender
-func (c *conn) send(upd *update, timeout time.Duration) error {
+func (c *conn) send(upd *update) error {
 	c.sendingMut.Lock()
 	defer c.sendingMut.Unlock()
-	//send
-	sent := make(chan error)
-	go func() {
-		sent <- c.transport.send(upd)
-	}()
-	//wait for timeout or sent
-	select {
-	case err := <-sent:
-		if err != nil {
-			return err
-		}
-	case <-time.After(timeout):
-		//timeout
-		return errors.New("send timed out")
-	}
-	return nil
+	//send (transports responsiblity to enforce timeouts)
+	return c.transport.send(upd)
 }

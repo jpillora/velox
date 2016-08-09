@@ -98,7 +98,13 @@ func main() {
 		port = "7070"
 	}
 	log.Printf("Listening on :%s...", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	s := http.Server{
+		Addr: ":" + port,
+		//these will be ignored, see State.WriteTimeout
+		ReadTimeout:  42 * time.Millisecond,
+		WriteTimeout: 42 * time.Millisecond,
+	}
+	log.Fatal(s.ListenAndServe())
 }
 
 var indexhtml = []byte(`

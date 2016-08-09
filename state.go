@@ -23,16 +23,18 @@ type Pusher interface {
 
 var (
 	//15ms is approximately highest resolution on the JS eventloop
-	MinThrottle        = 15 * time.Millisecond
-	DefaultThrottle    = 200 * time.Millisecond
-	DefaultSendTimeout = 30 * time.Second
+	MinThrottle         = 15 * time.Millisecond
+	DefaultThrottle     = 200 * time.Millisecond
+	DefaultWriteTimeout = 30 * time.Second
+	DefaultPingInterval = 25 * time.Second
 )
 
 //State must be embedded into a struct to make it syncable.
 type State struct {
 	//configuration
-	Throttle    time.Duration `json:"-"`
-	SendTimeout time.Duration `json:"-"`
+	Throttle     time.Duration `json:"-"`
+	WriteTimeout time.Duration `json:"-"`
+	PingInterval time.Duration `json:"-"`
 	//internal state
 	initMut  sync.Mutex
 	initd    bool
@@ -58,8 +60,11 @@ func (s *State) init(gostruct interface{}) error {
 	if s.Throttle < MinThrottle {
 		s.Throttle = DefaultThrottle
 	}
-	if s.SendTimeout == 0 {
-		s.SendTimeout = DefaultSendTimeout
+	if s.WriteTimeout == 0 {
+		s.WriteTimeout = DefaultWriteTimeout
+	}
+	if s.PingInterval == 0 {
+		s.PingInterval = DefaultPingInterval
 	}
 	//get initial JSON bytes and confirm gostruct is marshallable
 	if b, err := json.Marshal(gostruct); err != nil {
@@ -225,7 +230,7 @@ func (s *State) pushTo(c *conn) {
 	}
 	s.data.mut.RUnlock()
 	//send!
-	if err := c.send(update, s.SendTimeout); err != nil {
+	if err := c.send(update); err != nil {
 		c.Close()
 		return
 	}
