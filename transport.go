@@ -3,6 +3,7 @@ package velox
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bernerdschaefer/eventsource"
@@ -89,13 +91,18 @@ type eventSourceTransport struct {
 	writeTimeout time.Duration
 	conn         net.Conn
 	rw           *bufio.ReadWriter
+	gw           *gzip.Writer
 	enc          *eventsource.Encoder
 	chunked      io.WriteCloser
+	dst          io.Writer
 	isConnected  bool
 	connected    chan struct{}
 }
 
 func (es *eventSourceTransport) connect(w http.ResponseWriter, r *http.Request) error {
+	//
+	acceptGzip := strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")
+	//
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		return errors.New("underlying writer must be an http.Hijacker")
@@ -108,12 +115,21 @@ func (es *eventSourceTransport) connect(w http.ResponseWriter, r *http.Request) 
 	es.conn = conn
 	es.rw = rw
 	es.chunked = httputil.NewChunkedWriter(rw)
+	if acceptGzip {
+		es.gw = gzip.NewWriter(es.chunked)
+		es.dst = es.gw
+	} else {
+		es.dst = es.chunked
+	}
 	//http and eventsource headers
 	rw.WriteString("HTTP/1.1 200 OK\r\n")
 	h := http.Header{}
 	h.Set("Cache-Control", "no-cache")
 	h.Set("Vary", "Accept")
 	h.Set("Content-Type", "text/event-stream")
+	if acceptGzip {
+		h.Set("Content-Encoding", "gzip")
+	}
 	h.Write(rw)
 	h = http.Header{}
 	h.Set("Transfer-Encoding", "chunked")
@@ -171,6 +187,9 @@ func (esb *eventSourceBuffer) Write(p []byte) (int, error) {
 //flush converts the buffer into chunked then does write
 func (esb *eventSourceBuffer) Flush() {
 	esb.es.conn.SetWriteDeadline(time.Now().Add(esb.es.writeTimeout))
-	io.Copy(esb.es.chunked, &esb.buff)
+	io.Copy(esb.es.dst, &esb.buff)
+	// if esb.es.gw != nil {
+	// 	esb.es.gw.Flush()
+	// }
 	esb.es.rw.Flush()
 }

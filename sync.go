@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strconv"
 	"sync/atomic"
-	"time"
 
 	"github.com/jpillora/velox/assets"
 )
@@ -29,10 +28,10 @@ func SyncHandler(gostruct interface{}) http.Handler {
 			log.Printf("[velox] sync handler error: %s", err)
 		} else {
 
-			go func() {
-				time.Sleep(5 * time.Second)
-				conn.Close()
-			}()
+			// go func() {
+			// 	time.Sleep(5 * time.Second)
+			// 	conn.Close()
+			// }()
 
 			conn.Wait()
 		}

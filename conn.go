@@ -1,3 +1,6 @@
+//this is hosted on heroku at:
+// velox.jpillora.com
+
 package velox
 
 import (

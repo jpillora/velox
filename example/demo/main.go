@@ -17,8 +17,10 @@ import (
 const debug = false
 
 type Foo struct {
-	velox.State    //adds sync state and a Push() method
-	sync.Mutex     //optionally add locking to help prevent race conditions (foo.Push will make use of the sync.Locker interface)
+	//required velox state, adds sync state and a Push() method
+	velox.State
+	//optional mutex, prevents race conditions (foo.Push will make use of the sync.Locker interface)
+	sync.Mutex
 	NumConnections int
 	NumGoRoutines  int     `json:",omitempty"`
 	AllocMem       float64 `json:",omitempty"`
@@ -65,7 +67,7 @@ func main() {
 			//push to all connections
 			foo.Push()
 			//do other stuff...
-			time.Sleep(250 * time.Millisecond)
+			time.Sleep(2500 * time.Millisecond)
 		}
 	}()
 	//show memory/goroutine stats
@@ -128,8 +130,8 @@ v.onupdate = function() {
 <hr>
 
 Server:<br>
-<a href="https://github.com/jpillora/velox/blob/master/example/server.go" target="_blank">
-	https://github.com/jpillora/velox/blob/master/example/server.go
+<a href="https://github.com/jpillora/velox/blob/master/example/demo/main.go" target="_blank">
+	https://github.com/jpillora/velox/blob/master/example/demo/main.go
 </a>
 <hr>
 
