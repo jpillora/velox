@@ -3,9 +3,9 @@
   //"consts"
   var PROTO_VERISON = "v2";
   var PING_IN_INTERVAL = 45 * 1000;
-  var PING_OUT_INTERVAL = 30 * 1000;
-  var TIME_IN_INTERVAL = 5 * 1000;
-  var TIME_OUT_INTERVAL = 30 * 1000;
+  var PING_OUT_INTERVAL = 25 * 1000;
+  var SLEEP_CHECK = 5 * 1000;
+  var SLEEP_THRESHOLD = 30 * 1000;
   var MAX_RETRY_DELAY = 30 * 1000;
   //public method
   var velox = function(url, obj) {
@@ -171,9 +171,9 @@
       clearInterval(data.t);
       var now = Date.now();
       //should be ~5secs, over ~30sec - assume woken from sleep
-      var woken = data.last && (now - data.last) > TIME_OUT_INTERVAL;
+      var woken = data.last && (now - data.last) > SLEEP_THRESHOLD;
       data.last = now;
-      data.t = setTimeout(this.sleepCheck.bind(this), TIME_IN_INTERVAL);
+      data.t = setTimeout(this.sleepCheck.bind(this), SLEEP_CHECK);
       if(woken) this.retry();
     },
     statusCheck: function(err) {
