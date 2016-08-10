@@ -4,8 +4,6 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
-	// _ "net/http/pprof"
-
 	"sync"
 	"time"
 

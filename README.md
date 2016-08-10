@@ -13,6 +13,7 @@ Real-time Go struct to JS object synchronisation over SSE and WebSockets
 * Delta updates using [JSONPatch (RFC6902)](https://tools.ietf.org/html/rfc6902)
 * Supports [Server-Sent Events (EventSource)](https://en.wikipedia.org/wiki/Server-sent_events) and [WebSockets](https://en.wikipedia.org/wiki/WebSocket)
 * SSE [client-side poly-fill](https://github.com/remy/polyfills/blob/master/EventSource.js) to fallback to long-polling in older browsers (IE8+).
+* Implement delta queries (return all results, then incrementally return changes)
 
 ### Quick Usage
 
@@ -95,12 +96,6 @@ See this [simple `example/`](example/) and view it live here: https://velox.jpil
 
 * Object synchronization is currently one way (server to client) only.
 * Object diff has not been optimized. It is a simple property-by-property comparison. :warning: Performance testing has not been done yet.
-
-<!--
-### Improvements
-
-* Use deflate in [the client](https://github.com/dankogai/js-deflate) and on [the server](https://golang.org/pkg/compress/flate/) for more byte savings.
--->
 
 ### TODO
 
