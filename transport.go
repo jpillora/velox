@@ -123,11 +123,17 @@ func (es *eventSourceTransport) connect(w http.ResponseWriter, r *http.Request) 
 	//http and eventsource headers
 	rw.WriteString("HTTP/1.1 200 OK\r\n")
 	h := http.Header{}
+	wh := w.Header()
+	for k, _ := range wh {
+		h.Set(k, wh.Get(k))
+	}
 	h.Set("Cache-Control", "no-cache")
 	h.Set("Vary", "Accept")
 	h.Set("Content-Type", "text/event-stream")
 	if acceptGzip {
 		h.Set("Content-Encoding", "gzip")
+	} else {
+		h.Del("Content-Encoding")
 	}
 	h.Write(rw)
 	h = http.Header{}
