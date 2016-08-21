@@ -54,7 +54,7 @@ type websocketsTransport struct {
 func (ws *websocketsTransport) connect(w http.ResponseWriter, r *http.Request) error {
 	conn, err := defaultUpgrader.Upgrade(w, r, nil)
 	if err != nil {
-		return fmt.Errorf("cannot upgrade connection: %s", err)
+		return fmt.Errorf("[velox] cannot upgrade connection: %s", err)
 	}
 	ws.conn = conn
 	return nil
@@ -102,11 +102,11 @@ func (es *eventSourceTransport) connect(w http.ResponseWriter, r *http.Request) 
 	//hijack
 	hj, ok := w.(http.Hijacker)
 	if !ok {
-		return errors.New("underlying writer must be an http.Hijacker")
+		return errors.New("[velox] underlying writer must be an http.Hijacker")
 	}
 	conn, rw, err := hj.Hijack()
 	if err != nil {
-		return errors.New("failed to hijack underlying net.Conn")
+		return errors.New("[velox] failed to hijack underlying net.Conn")
 	}
 	//can we gzip?
 	acceptGzip := strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")
