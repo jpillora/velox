@@ -171,6 +171,9 @@ func (es *eventSourceTransport) wait() error {
 func (es *eventSourceTransport) close() error {
 	es.enc.Flush()
 	es.chunked.Close()
+	if es.gw != nil {
+		es.gw.Close()
+	}
 	es.rw.Flush()
 	return es.conn.Close()
 }
