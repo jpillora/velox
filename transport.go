@@ -14,6 +14,7 @@ import (
 	"net/http/httputil"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bernerdschaefer/eventsource"
@@ -182,17 +183,22 @@ func (es *eventSourceTransport) close() error {
 //over a hijacked read/write buffer while
 //setting write deadlines
 type eventSourceBuffer struct {
+	mut  sync.Mutex
 	es   *eventSourceTransport
 	buff bytes.Buffer
 }
 
 //write to memory
 func (esb *eventSourceBuffer) Write(p []byte) (int, error) {
+	esb.mut.Lock()
+	defer esb.mut.Unlock()
 	return esb.buff.Write(p)
 }
 
 //flush converts the buffer into chunked then does write
 func (esb *eventSourceBuffer) Flush() {
+	esb.mut.Lock()
+	defer esb.mut.Unlock()
 	esb.es.conn.SetWriteDeadline(time.Now().Add(esb.es.writeTimeout))
 	io.Copy(esb.es.dst, &esb.buff)
 	if esb.es.gw != nil {

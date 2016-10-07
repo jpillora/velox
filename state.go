@@ -67,6 +67,11 @@ func (s *State) init(gostruct interface{}) error {
 		s.PingInterval = DefaultPingInterval
 	}
 	//get initial JSON bytes and confirm gostruct is marshallable
+	l, ok := gostruct.(sync.Locker)
+	if ok {
+		l.Lock()
+		defer l.Unlock()
+	}
 	if b, err := json.Marshal(gostruct); err != nil {
 		return fmt.Errorf("JSON marshalling failed: %s", err)
 	} else {
@@ -132,7 +137,7 @@ func (s *State) NumConnections() int {
 
 //Send the changes from this object to all connected clients.
 //Push is thread-safe and is throttled so it can be called
-//with abandon. Returns false if a Push in progress.
+//with abandon. Returns false if a Push is already in progress.
 func (s *State) Push() bool {
 	//attempt to mark state as 'pushing'
 	if atomic.CompareAndSwapUint32(&s.push.ing, 0, 1) {

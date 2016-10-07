@@ -27,12 +27,6 @@ func SyncHandler(gostruct interface{}) http.Handler {
 		if conn, err := Sync(gostruct, w, r); err != nil {
 			log.Printf("[velox] sync handler error: %s", err)
 		} else {
-
-			// go func() {
-			// 	time.Sleep(5 * time.Second)
-			// 	conn.Close()
-			// }()
-
 			conn.Wait()
 		}
 	})
