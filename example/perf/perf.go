@@ -52,6 +52,19 @@ func main() {
 		}
 	}()
 
+	//show goroutine/memory usage
+	// go func() {
+	// 	mem := runtime.MemStats{}
+	// 	for {
+	// 		g := runtime.NumGoroutine()
+	// 		runtime.ReadMemStats(&mem)
+	// 		time.Sleep(1000 * time.Millisecond)
+	// 		log.Printf("goroutines: %03d, allocated %s", g, sizestr.ToString(int64(mem.Alloc)))
+	// 	}
+	// }()
+
+	b.State.WriteTimeout = 3 * time.Second
+
 	//sync handlers
 	router := http.NewServeMux()
 	router.Handle("/velox.js", velox.JS)

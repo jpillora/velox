@@ -52,7 +52,6 @@ type State struct {
 		mut    sync.Mutex
 		ing    uint32
 		queued uint32
-		wg     sync.WaitGroup
 	}
 }
 
@@ -198,49 +197,9 @@ func (s *State) gopush() {
 	s.connMut.Lock()
 	for _, c := range s.conns {
 		if c.version != s.data.version {
-			s.push.wg.Add(1)
-			go func(c *conn) {
-				s.pushTo(c)
-				s.push.wg.Done()
-			}(c)
+			go c.push()
 		}
 	}
 	s.connMut.Unlock()
-	//wait for all connection pushes
-	s.push.wg.Wait()
-	//cleanup()
-}
-
-func (s *State) pushTo(c *conn) {
-	s.data.mut.RLock()
-	if c.version == s.data.version {
-		s.data.mut.RUnlock()
-		return
-	}
-	update := &update{Version: s.data.version}
-	//first push? include id
-	if atomic.CompareAndSwapUint32(&c.first, 0, 1) {
-		update.ID = s.data.id
-	}
-	//choose optimal update (send the smallest)
-	if s.data.delta != nil &&
-		c.version == (s.data.version-1) &&
-		len(s.data.bytes) > 0 &&
-		len(s.data.delta) < len(s.data.bytes) {
-		update.Delta = true
-		update.Body = s.data.delta
-	} else {
-		update.Delta = false
-		update.Body = s.data.bytes
-	}
-	s.data.mut.RUnlock()
-	//send!
-	if err := c.send(update); err != nil {
-		c.Close()
-		return
-	}
-	//on success, update client version
-	s.data.mut.RLock()
-	c.version = s.data.version
-	s.data.mut.RUnlock()
+	//defered cleanup()
 }

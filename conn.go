@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -30,9 +31,11 @@ type conn struct {
 	id          int64
 	addr        string
 	first       uint32
+	pushing     uint32
+	queued      uint32
 	uptime      time.Time
 	version     int64
-	sendingMut  sync.Mutex
+	sendingMut  sync.Mutex //for msg/ping
 }
 
 func newConn(id int64, addr string, state *State, version int64) *conn {
@@ -63,7 +66,7 @@ func (c *conn) Wait() {
 //Push will the current state only to this client.
 //Blocks until push is complete.
 func (c *conn) Push() {
-	c.state.pushTo(c)
+	c.push()
 }
 
 //Force close the connection.
@@ -72,7 +75,7 @@ func (c *conn) Close() error {
 }
 
 //connect using the provided transport
-//and block until successfully connected
+//and block until connection is ready
 func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 	//choose transport
 	if r.Header.Get("Accept") == "text/event-stream" {
@@ -120,6 +123,57 @@ func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 	}()
 	//now connected, consumer can connection.Wait()
 	return nil
+}
+
+func (c *conn) push() {
+	//attempt to mark state as 'pushing'
+	if !atomic.CompareAndSwapUint32(&c.pushing, 0, 1) {
+		//if already pushing, mark queued
+		atomic.StoreUint32(&c.queued, 1)
+		return
+	}
+	defer func() {
+		//no longer pushing
+		atomic.StoreUint32(&c.pushing, 0)
+		//queued? dequeue and push again
+		if atomic.CompareAndSwapUint32(&c.queued, 1, 0) {
+			c.push() //within same goroutine
+		}
+	}()
+	//current state data
+	d := &c.state.data
+	d.mut.RLock()
+	if c.version == d.version {
+		d.mut.RUnlock()
+		//already have this version
+		return
+	}
+	update := &update{Version: d.version}
+	//first push? include id
+	if atomic.CompareAndSwapUint32(&c.first, 0, 1) {
+		update.ID = d.id
+	}
+	//choose optimal update (send the smallest)
+	if d.delta != nil &&
+		c.version == (d.version-1) &&
+		len(d.bytes) > 0 &&
+		len(d.delta) < len(d.bytes) {
+		update.Delta = true
+		update.Body = d.delta
+	} else {
+		update.Delta = false
+		update.Body = d.bytes
+	}
+	d.mut.RUnlock()
+	//unlock data and send!
+	if err := c.send(update); err != nil {
+		c.Close()
+		return
+	}
+	//on success, relock and update client version
+	d.mut.RLock()
+	c.version = d.version
+	d.mut.RUnlock()
 }
 
 //send to connection, ensure only 1 concurrent sender
