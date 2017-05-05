@@ -34,7 +34,7 @@ func SyncHandler(gostruct interface{}) http.Handler {
 
 var connectionID int64
 
-//Sync upgrades a given HTTP connection into a WebSocket connection and synchronises
+//Sync upgrades a given HTTP connection into a velox connection and synchronises
 //the provided struct with the client. velox takes responsibility for writing the response
 //in the event of failure. Default handlers close the TCP connection on return so when
 //manually using this method, you'll most likely want to block using Conn.Wait().

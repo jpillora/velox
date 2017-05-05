@@ -1,13 +1,14 @@
 package main
 
 import (
+	"compress/gzip"
 	"log"
 	"math/rand"
 	"net/http"
 	"sync"
 	"time"
 
-	"github.com/jpillora/gziphandler"
+	"github.com/NYTimes/gziphandler"
 	"github.com/jpillora/velox"
 )
 
@@ -36,13 +37,15 @@ func main() {
 			//push to all connections
 			foo.Push()
 			//do other stuff...
-			time.Sleep(2500 * time.Millisecond)
+			time.Sleep(250 * time.Millisecond)
 		}
 	}()
 	//sync handlers
 	router := http.NewServeMux()
 	router.Handle("/velox.js", velox.JS)
-	router.Handle("/sync", velox.SyncHandler(foo))
+
+	gzipper, _ := gziphandler.NewGzipLevelAndMinSize(gzip.DefaultCompression, 0)
+	router.Handle("/sync", gzipper(velox.SyncHandler(foo)))
 	//index handler
 	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -51,11 +54,10 @@ func main() {
 
 	//jpillora/gziphandler ignores websocket/eventsource connections
 	//and gzips the rest
-	gzippedRouter := gziphandler.GzipHandler(router)
 
 	//listen!
 	log.Printf("Listening on 7070...")
-	log.Fatal(http.ListenAndServe(":7070", gzippedRouter))
+	log.Fatal(http.ListenAndServe(":7070", router))
 }
 
 var indexhtml = []byte(`

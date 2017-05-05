@@ -49,8 +49,8 @@ func main() {
 		w.Write(indexhtml)
 	})
 	//listen!
-	log.Printf("Listening on 7070...")
-	log.Fatal(http.ListenAndServe(":7070", nil))
+	log.Printf("Listening on 3000...")
+	log.Fatal(http.ListenAndServe(":3000", nil))
 }
 
 var indexhtml = []byte(`

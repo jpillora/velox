@@ -1,19 +1,12 @@
 package velox
 
 import (
-	"bufio"
-	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"net"
 	"net/http"
-	"net/http/httputil"
 	"strconv"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/bernerdschaefer/eventsource"
@@ -85,76 +78,36 @@ func (ws *websocketsTransport) close() error {
 }
 
 //=========================
-//eventsource is implemented over raw tcp
-//to allow for control over timeouts.
-//the message pipeline is as follows:
-// 1. raw message
-// 2. eventsource message
-// 3. chunked encoded
-// 4. gzip [optional]
-// 5. buffered connection
 
 type eventSourceTransport struct {
 	writeTimeout time.Duration
-	conn         net.Conn
-	rw           *bufio.ReadWriter
-	gw           *gzip.Writer
 	enc          *eventsource.Encoder
-	chunked      io.WriteCloser
-	dst          io.Writer
-	mut          sync.Mutex
-	ferr         error
-	useGzip      bool
+	flusher      http.Flusher
 	isConnected  bool
 	connected    chan struct{}
 }
 
 func (es *eventSourceTransport) connect(w http.ResponseWriter, r *http.Request) error {
-	//hijack
-	hj, ok := w.(http.Hijacker)
+	notifier, ok := w.(http.CloseNotifier)
 	if !ok {
-		return errors.New("[velox] underlying writer must be an http.Hijacker")
+		return errors.New("underlying writer must be an http.CloseNotifier")
 	}
-	conn, rw, err := hj.Hijack()
-	if err != nil {
-		return errors.New("[velox] failed to hijack underlying net.Conn")
-	}
-	//can we gzip?
-	es.useGzip = strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")
-	//init
-	es.conn = conn
-	es.rw = rw
-	es.chunked = httputil.NewChunkedWriter(rw)
-	if es.useGzip {
-		es.gw = gzip.NewWriter(es.chunked)
-		es.dst = es.gw
-	} else {
-		es.dst = es.chunked
-	}
-	//http and eventsource headers
-	rw.WriteString("HTTP/1.1 200 OK\r\n")
-	h := http.Header{}
-	wh := w.Header()
-	for k, _ := range wh {
-		h.Set(k, wh.Get(k))
-	}
-	h.Set("Cache-Control", "no-cache")
-	h.Set("Vary", "Accept")
-	h.Set("Content-Type", "text/event-stream")
-	if es.useGzip {
-		h.Set("Content-Encoding", "gzip")
-	} else {
-		h.Del("Content-Encoding")
-	}
-	h.Write(rw)
-	h = http.Header{}
-	h.Set("Transfer-Encoding", "chunked")
-	h.Write(rw)
-	rw.WriteString("\r\n")
-	rw.Flush()
-	//connection is now expecting a chunked stream of events
-	es.enc = eventsource.NewEncoder(es)
-	//ready!
+	//connection controls
+	es.isConnected = true
+	es.connected = make(chan struct{})
+	go func() {
+		select {
+		case <-es.connected:
+		case <-notifier.CloseNotify(): //client disconnected early
+			es.close()
+		}
+	}()
+	//eventsource headers
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Vary", "Accept")
+	w.Header().Set("Content-Type", "text/event-stream")
+	//connection is now expecting a stream of events
+	es.enc = eventsource.NewEncoder(w)
 	return nil
 }
 
@@ -163,53 +116,31 @@ func (es *eventSourceTransport) send(upd *update) error {
 	if err != nil {
 		return err
 	}
-	return es.enc.Encode(eventsource.Event{
-		ID:   strconv.FormatInt(upd.Version, 10),
-		Data: b,
-	})
+	sent := make(chan error)
+	go func() {
+		sent <- es.enc.Encode(eventsource.Event{
+			ID:   strconv.FormatInt(upd.Version, 10),
+			Data: b,
+		})
+	}()
+	select {
+	case <-time.After(es.writeTimeout):
+		return errors.New("timeout")
+	case err := <-sent:
+		return err
+	}
 }
 
 func (es *eventSourceTransport) wait() error {
-	//disable readtime outs
-	es.conn.SetReadDeadline(time.Time{})
-	//read to /dev/null
-	_, err := io.Copy(ioutil.Discard, es.rw)
-	if err != nil && err != io.EOF {
-		return err
-	}
+	<-es.connected
 	return nil
 }
 
 func (es *eventSourceTransport) close() error {
-	es.enc.Flush()
-	es.chunked.Close()
-	if es.useGzip {
-		es.gw.Close()
+	if es.isConnected {
+		//unblocking the wait, causes the http handler to return
+		close(es.connected)
+		es.isConnected = false
 	}
-	es.rw.Flush()
-	return es.conn.Close()
-}
-
-func (es *eventSourceTransport) Write(p []byte) (int, error) {
-	es.mut.Lock()
-	defer es.mut.Unlock()
-	//propagate flush errors here
-	if es.ferr != nil {
-		return 0, es.ferr
-	}
-	//write to chunked/gzip (backed by buffered connection)
-	return es.dst.Write(p)
-}
-
-//flush converts the buffer into chunked then does write
-func (es *eventSourceTransport) Flush() {
-	es.mut.Lock()
-	defer es.mut.Unlock()
-	//expect connection write within <write-timeout>
-	es.conn.SetWriteDeadline(time.Now().Add(es.writeTimeout))
-	//flush gzip and buffered connection
-	if es.useGzip {
-		es.gw.Flush()
-	}
-	es.ferr = es.rw.Flush()
+	return nil
 }

@@ -36,7 +36,7 @@ func main() {
 		//connected, now query for results
 		go func() {
 			//load all results
-			results.X = 1
+			results.X = rand.Intn(99)
 			results.Y = 2
 			results.Z = 3
 			results.Push()
@@ -62,8 +62,8 @@ func main() {
 	})
 
 	//listen!
-	log.Printf("Listening on 7070...")
-	log.Fatal(http.ListenAndServe(":7070", router))
+	log.Printf("Listening on 3000...")
+	log.Fatal(http.ListenAndServe(":3000", router))
 }
 
 var indexhtml = []byte(`
