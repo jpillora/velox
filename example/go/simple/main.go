@@ -41,7 +41,7 @@ func main() {
 		}
 	}()
 	//sync handlers
-	http.Handle("/velox.js", velox.JS)
+	// http.Handle("/velox.js", velox.JS)
 	http.Handle("/sync", velox.SyncHandler(foo))
 	//index handler
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +56,7 @@ func main() {
 var indexhtml = []byte(`
 <div>Status: <b id="status">disconnected</b></div>
 <pre id="example"></pre>
-<script src="/velox.js?dev=1"></script>
+<script src="http://localhost:7000/bundle.js"></script>
 <script>
 var foo = {};
 var v = velox("/sync", foo);

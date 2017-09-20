@@ -1,0 +1,39 @@
+{
+  "name": "velox",
+  "version": "0.3.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "example": "example"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jpillora/velox.git"
+  },
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/jpillora/velox/issues"
+  },
+  "homepage": "https://github.com/jpillora/velox#readme",
+  "scripts": {
+    "build":
+      "./node_modules/.bin/webpack --config webpack.config.js && go generate ../assets",
+    "build-dev":
+      "./node_modules/.bin/webpack --config webpack.config.js --devtool source-map"
+  },
+  "dependencies": {
+    "event-source-polyfill": "0.0.9",
+    "eventsource": "^1.0.5",
+    "fast-json-patch": "^2.0.5",
+    "lodash": "^4.17.4",
+    "ssestream": "^1.0.0",
+    "ws": "^3.2.0"
+  },
+  "devDependencies": {
+    "babel-core": "^6.26.0",
+    "babel-loader": "^7.1.2",
+    "babel-preset-env": "^1.6.0",
+    "uglifyjs-webpack-plugin": "^0.4.6",
+    "webpack": "^3.6.0"
+  }
+}

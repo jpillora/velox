@@ -1,4 +1,4 @@
-//go:generate ./generate.sh
+//go:generate go-bindata -pkg assets -o files.go bundle.js
 
 package assets
 
@@ -10,12 +10,9 @@ import (
 )
 
 var VeloxJS = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-	path := "dist/velox.min.js"
-	if req.URL.Query().Get("dev") != "" {
-		path = "dist/velox.js"
-	}
-	b, _ := Asset(path)
-	info, _ := AssetInfo(path)
+	filename := "bundle.js"
+	b, _ := Asset(filename)
+	info, _ := AssetInfo(filename)
 	//requested compression and not already compressed?
 	if strings.Contains(req.Header.Get("Accept-Encoding"), "gzip") && w.Header().Get("Content-Encoding") != "gzip" {
 		gb := bytes.Buffer{}
