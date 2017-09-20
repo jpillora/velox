@@ -17,9 +17,9 @@
   "homepage": "https://github.com/jpillora/velox#readme",
   "scripts": {
     "build":
-      "./node_modules/.bin/webpack --config webpack.config.js && go generate ../assets",
+      "./node_modules/.bin/webpack --config js/webpack.config.js && go generate .",
     "build-dev":
-      "./node_modules/.bin/webpack --config webpack.config.js --devtool source-map"
+      "./node_modules/.bin/webpack --config js/webpack.config.js --devtool source-map"
   },
   "dependencies": {
     "event-source-polyfill": "0.0.9",

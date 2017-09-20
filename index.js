@@ -1,5 +1,5 @@
-const client = require("./client/entry-node");
-const server = require("./server/entry-server");
+const client = require("./js/client/entry-node");
+const server = require("./js/server/entry-server");
 //place server functions onto the exported function
 client.handle = server.handle;
 client.JS = server.JS;

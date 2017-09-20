@@ -1,6 +1,6 @@
-//go:generate go-bindata -pkg assets -o files.go bundle.js
+//go:generate go-bindata -pkg velox -o files.go ../js/build/bundle.js
 
-package assets
+package velox
 
 import (
 	"bytes"
@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-var VeloxJS = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+var JS = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 	filename := "bundle.js"
 	b, _ := Asset(filename)
 	info, _ := AssetInfo(filename)

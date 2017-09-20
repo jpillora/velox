@@ -6,14 +6,10 @@ import (
 	"net/http"
 	"strconv"
 	"sync/atomic"
-
-	"github.com/jpillora/velox/assets"
 )
 
 //NOTE(@jpillora): always assume v1, include v2 in checks when we get there...
 const proto = "v1"
-
-var JS = assets.VeloxJS
 
 type syncer interface {
 	sync(gostruct interface{}) (*State, error)

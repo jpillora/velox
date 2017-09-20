@@ -1,13 +1,13 @@
 const path = require("path");
 const webpack = require("webpack");
 const UglifyJSPlugin = require("uglifyjs-webpack-plugin");
-const pkg = require("./package.json");
+const pkg = require("../package.json");
 
 module.exports = {
   entry: path.resolve(__dirname, "client", "entry-browser.js"),
   output: {
     filename: "bundle.js",
-    path: path.resolve(__dirname, "..", "assets")
+    path: path.resolve(__dirname, "build")
   },
   plugins: [
     new UglifyJSPlugin({output: {comments: false}}),
