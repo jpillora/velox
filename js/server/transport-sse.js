@@ -1,4 +1,5 @@
 const SseStream = require("ssestream");
+const throttle = require("lodash/throttle");
 
 let connectionCount = 0;
 
@@ -13,6 +14,7 @@ module.exports = class EventSourceTransport {
     this.res.on("close", this.cleanup.bind(this));
     this.res.on("end", this.cleanup.bind(this));
     this.waiter = new Promise(waited => (this.waited = waited));
+    this.flush = throttle(this.flush.bind(this), 50);
   }
 
   close() {
@@ -23,15 +25,6 @@ module.exports = class EventSourceTransport {
     return this.waiter;
   }
 
-  flush() {
-    if (!this.res.flush) {
-      return;
-    }
-    //debounce
-    clearTimeout(this.flushTimer);
-    this.flushTimer = setTimeout(() => this.res.flush(), 50);
-  }
-
   cleanup() {
     this.waited();
     this.s.unpipe(this.res);
@@ -39,18 +32,33 @@ module.exports = class EventSourceTransport {
 
   writeAs(event, data) {
     return new Promise((resolve, _) => {
+      //attempt write
       this.s.write(
         {
           id: ++this.eventId,
           event: event,
           data: data
         },
-        resolve
+        () => {
+          //written!
+          if (this.res.get("Content-Encoding") === "gzip") {
+            this.flush();
+          }
+          resolve();
+        }
       );
     });
   }
 
   async write(data) {
     return this.writeAs("message", data);
+  }
+
+  //flush is required for middleware which
+  //response buffer data, like gzip. throttled to 50ms.
+  flush() {
+    if (this.res.flush) {
+      this.res.flush();
+    }
   }
 };

@@ -18,9 +18,11 @@ module.exports = class Connection {
   async setup(req, res) {
     if (req.headers["accept"] === "text/event-stream") {
       this.transport = new EventSourceTransport(req, res);
-      // } else if (req.headers["upgrade"] === "websocket") {
+    } else if (req.headers["upgrade"] === "websocket") {
       // TODO WEBSOCKETS
-      //   this.transport = new WebSocketTransport(req, res);
+      // this.transport = new WebSocketTransport(req, res);
+      res.status(501).send("WebSockets not implemented yet");
+      return false;
     } else {
       res.status(400).send("Invalid sync request");
       return false;
@@ -29,11 +31,13 @@ module.exports = class Connection {
     if (this.state.id === req.query.id && /^\d+$/.test(req.query.v)) {
       this.version = parseInt(req.query.v, 10);
     }
+    this.debug("setup", req.query);
     this.connected = true;
     return true;
   }
 
   async wait() {
+    this.debug("open");
     //subscribe while the transport connection is active
     this.state.subscribe(this);
     //start ping interval
@@ -47,6 +51,7 @@ module.exports = class Connection {
     this.connected = false;
     //unsubscribe
     this.state.unsubscribe(this);
+    this.debug("close");
   }
 
   async keepAlive() {
@@ -75,17 +80,22 @@ module.exports = class Connection {
     ) {
       delta = true;
     }
-    let update = JSON.stringify({
+
+    let update = {
       id: id,
       version: this.state.version,
       delta: delta,
       body: null
-    });
+    };
     //string replace to make use of cached json payload
-    let payload = delta ? this.state.delta : this.state.json;
-    update = update.replace(/"body":null\}$/, `"body":${payload}}`);
+    let body = delta ? this.state.delta : this.state.json;
+    let payload = JSON.stringify(update).replace(
+      /"body":null\}$/,
+      `"body":${body}}`
+    );
+    this.debug("write msg#" + this.writes + " " + payload.length + "bytes");
     //write onto the wire!
-    await this.transport.write(update);
+    await this.transport.write(payload);
     this.writes++;
     //success
     this.version = this.state.version;
@@ -94,6 +104,13 @@ module.exports = class Connection {
     if (this.queued) {
       this.queued = false;
       this.push();
+    }
+  }
+
+  debug() {
+    if (this.state.opts.debug) {
+      let args = Array.from(arguments);
+      console.log.apply(console, ["connection#" + this.id + ":"].concat(args));
     }
   }
 };

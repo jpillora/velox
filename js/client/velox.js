@@ -1,5 +1,7 @@
 const jsonpatch = require("fast-json-patch");
 const merge = require("./merge");
+const parseUrl = require("url-parse");
+const Backoff = require("backo");
 
 const PROTO_VERISON = "v2";
 const PING_IN_INTERVAL = 45 * 1000;
@@ -22,7 +24,7 @@ let connections = []; //track open connections
 
 //velox class - represents a single websocket (Conn on the server-side)
 class Velox {
-  constructor(type, url, obj) {
+  constructor(type, url, obj, opts) {
     switch (type) {
       case WS:
         if (!root.WebSocket) throw "This client does not support WebSockets";
@@ -34,12 +36,19 @@ class Velox {
       default:
         throw "Type must be velox.WS or velox.SSE";
     }
+    if (!obj || typeof obj !== "object") {
+      throw "Invalid object";
+    }
+    this.obj = obj;
+    this.opts = opts || {};
+    this.backoff = new Backoff(this.opts.backoff || {min: 100, max: 20000});
+    if (this.opts.retry === undefined) {
+      this.opts.retry = true;
+    }
     if (!url) {
       url = "/velox";
     }
     this.url = url;
-    if (!obj || typeof obj !== "object") throw "Invalid object";
-    this.obj = obj;
     this.id = "";
     this.version = 0;
     this.onupdate = function() {
@@ -64,6 +73,12 @@ class Velox {
     if (connections.indexOf(this) === -1) {
       connections.push(this);
     }
+    if ("Promise" in root) {
+      this.waited = null;
+      this.waiter = new Promise(w => {
+        this.waited = w;
+      });
+    }
     this.retrying = true;
     this.retry();
   }
@@ -81,10 +96,24 @@ class Velox {
     if (this.ws) {
       url = url.replace(/^http/, "ws");
     }
-    let params = [];
-    if (this.version) params.push("v=" + this.version);
-    if (this.id) params.push("id=" + this.id);
-    if (params.length) url += (/\?/.test(url) ? "&" : "?") + params.join("&");
+    //convert to url object
+    let u = parseUrl(url, true);
+    //add query params
+    if (this.version) {
+      u.query.v = this.version;
+    }
+    if (this.id) {
+      u.query.id = this.id;
+    }
+    //add auth
+    if (this.opts.username) {
+      u.username = this.opts.username;
+    }
+    if (this.opts.password) {
+      u.password = this.opts.password;
+    }
+    //convert back to string
+    url = u.toString();
     //connect!
     if (this.ws) {
       this.conn = new root.WebSocket(url);
@@ -103,6 +132,9 @@ class Velox {
     if (i >= 0) connections.splice(i, 1);
     this.retrying = false;
     this.cleanup();
+    if (this.waiter) {
+      this.waited();
+    }
   }
   cleanup() {
     clearTimeout(this.pingout.t);
@@ -188,7 +220,7 @@ class Velox {
     this.onupdate(this.obj);
     this.version = update.version;
     //successful msg resets retry counter
-    this.delay = 100;
+    this.backoff.reset();
   }
   connopen() {
     this.statusCheck();
@@ -197,10 +229,15 @@ class Velox {
   }
   connclose() {
     this.statusCheck();
-    //backoff retry connection
-    this.delay = Math.min(MAX_RETRY_DELAY, this.delay * 2);
-    if (this.retrying && velox.online) {
-      this.retry.t = setTimeout(this.connect.bind(this), this.delay);
+    if (this.opts.retry) {
+      //if enabled, backoff retry connection
+      let d = this.backoff.duration();
+      if (this.retrying && velox.online) {
+        this.retry.t = setTimeout(this.connect.bind(this), d);
+      }
+    } else {
+      //otherwise, disconnect
+      this.disconnect();
     }
   }
   connerror(err) {
@@ -215,22 +252,26 @@ class Velox {
       this.onerror(err);
     }
   }
+  wait() {
+    //this requires Promise support
+    return this.waiter;
+  }
 }
 
-//public method
-let velox = function(url, obj) {
+//public interface
+let velox = function(url, obj, opts) {
   if (velox.DEFAULT === SSE || !root.WebSocket) {
-    return velox.sse(url, obj);
+    return velox.sse(url, obj, opts);
   }
-  return velox.ws(url, obj);
+  return velox.ws(url, obj, opts);
 };
 velox.WS = WS;
-velox.ws = function(url, obj) {
-  return new Velox(WS, url, obj);
+velox.ws = function(url, obj, opts) {
+  return new Velox(WS, url, obj, opts);
 };
 velox.SSE = velox.DEFAULT = SSE;
-velox.sse = function(url, obj) {
-  return new Velox(SSE, url, obj);
+velox.sse = function(url, obj, opts) {
+  return new Velox(SSE, url, obj, opts);
 };
 velox.proto = PROTO_VERISON;
 velox.connections = connections;

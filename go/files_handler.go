@@ -1,4 +1,4 @@
-//go:generate go-bindata -pkg velox -o files.go ../js/build/bundle.js
+//go:generate go-bindata -pkg velox -o files.go -prefix ../js/build/ ../js/build/bundle.js
 
 package velox
 

@@ -7,8 +7,11 @@ const velox = require("./velox");
 var vs = velox.connections;
 function onstatus(event) {
   velox.online = navigator.onLine;
-  if (velox.online)
-    for (var i = 0; i < vs.length; i++) if (vs[i].retrying) vs[i].retry();
+  if (velox.online) {
+    for (var i = 0; i < vs.length; i++) {
+      if (vs[i].retrying) vs[i].retry();
+    }
+  }
 }
 window.addEventListener("online", onstatus);
 window.addEventListener("offline", onstatus);
