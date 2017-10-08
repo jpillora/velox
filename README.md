@@ -44,7 +44,7 @@ foo := &Foo{
 	a: 1,
 	b: 2
 }
-
+//express server
 let app = express();
 //serve velox.js client library (assets/dist/velox.min.js)
 app.get("/velox.js", velox.JS)
@@ -62,7 +62,7 @@ Client (Node and Browser)
 ``` js
 // load script /velox.js
 var foo = {};
-var v = velox("/sync", foo); //uses websockets if supported, otherwise, use sse
+var v = velox("/sync", foo);
 v.onupdate = function() {
 	//foo.A === 42 and foo.B === 21
 };
@@ -126,6 +126,7 @@ See this [simple `example/`](example/) and view it live here: https://velox.jpil
 ### TODO
 
 * WebRTC support
+* Plain [`http`](https://nodejs.org/api/http.html#http_http_createserver_requestlistener) server support in Node
 * WebSockets support in Node
 
 #### MIT License
