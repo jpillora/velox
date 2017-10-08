@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jpillora/jsonpatch"
+	"github.com/mattbaird/jsonpatch"
 )
 
 //Pusher implements a push method,
