@@ -8,7 +8,7 @@ Real-time JS object synchronisation over SSE and WebSockets in Go and JavaScript
 
 * Simple API
 * Synchronise any JSON marshallable struct in Go
-* Synchronise any JSON stringifyable struct in Node
+* Synchronise any JSON stringifiable struct in Node
 * Delta updates using [JSONPatch (RFC6902)](https://tools.ietf.org/html/rfc6902)
 * Supports [Server-Sent Events (EventSource)](https://en.wikipedia.org/wiki/Server-sent_events) and [WebSockets](https://en.wikipedia.org/wiki/WebSocket)
 * SSE [client-side poly-fill](https://github.com/remy/polyfills/blob/master/EventSource.js) to fallback to long-polling in older browsers (IE8+).
@@ -77,10 +77,12 @@ Server API (Go)
 Server API (Node)
 
 * `velox.handle(object)` *function* returns `v` - Creates a new route handler for use with express
+* `velox.state(object)` *function* returns `state` - Creates or restores a velox state from a given object
+* `state.handle(req, res)` *function* returns `Promise` - Handle the provided `express` request/response. Resolves on connection close. Rejects on any error.
 
-Client API
+Client API (Node and Browser)
 
-* `velox(url, object)` *function* returns `v` - Creates a new auto-detect velox connection
+* `velox(url, object)` *function* returns `v` - Creates a new SSE velox connection
 * `velox.sse(url, object)` *function* returns `v` - Creates a new SSE velox connection
 * `velox.ws(url, object)` *function* returns `v` - Creates a new WS velox connection
 * `v.onupdate(object)` *function* - Called when a server push is received
@@ -119,11 +121,12 @@ See this [simple `example/`](example/) and view it live here: https://velox.jpil
 ### Known issues
 
 * Object synchronization is currently one way (server to client) only.
-* Object diff has not been optimized. It is a simple property-by-property comparison. :warning: Performance testing has not been done yet.
+* Object diff has not been optimized. It is a simple property-by-property comparison.
 
 ### TODO
 
 * WebRTC support
+* WebSockets support in Node
 
 #### MIT License
 
