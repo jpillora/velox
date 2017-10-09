@@ -96,14 +96,11 @@ func main() {
 	//listen!
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "7070"
+		port = "3000"
 	}
 	log.Printf("Listening on :%s...", port)
 	s := http.Server{
 		Addr: ":" + port,
-		//these will be ignored by velox.SyncHandler, see State.WriteTimeout
-		ReadTimeout:  42 * time.Millisecond,
-		WriteTimeout: 42 * time.Millisecond,
 	}
 	log.Fatal(s.ListenAndServe())
 }

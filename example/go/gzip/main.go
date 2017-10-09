@@ -41,23 +41,17 @@ func main() {
 		}
 	}()
 	//sync handlers
-	router := http.NewServeMux()
-	router.Handle("/velox.js", velox.JS)
-
+	http.Handle("/velox.js", velox.JS)
 	gzipper, _ := gziphandler.NewGzipLevelAndMinSize(gzip.DefaultCompression, 0)
-	router.Handle("/sync", gzipper(velox.SyncHandler(foo)))
+	http.Handle("/sync", gzipper(velox.SyncHandler(foo)))
 	//index handler
-	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		w.Write(indexhtml)
 	})
-
-	//jpillora/gziphandler ignores websocket/eventsource connections
-	//and gzips the rest
-
 	//listen!
-	log.Printf("Listening on 7070...")
-	log.Fatal(http.ListenAndServe(":7070", router))
+	log.Printf("Listening on 3000...")
+	log.Fatal(http.ListenAndServe(":3000", nil))
 }
 
 var indexhtml = []byte(`
@@ -66,7 +60,7 @@ var indexhtml = []byte(`
 <script src="/velox.js?dev=1"></script>
 <script>
 var foo = {};
-var v = velox("/sync", foo);
+var v = velox.ws("/sync", foo);
 v.onchange = function(isConnected) {
 	document.querySelector("#status").innerHTML = isConnected ? "connected" : "disconnected";
 };
