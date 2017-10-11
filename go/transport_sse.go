@@ -45,10 +45,15 @@ func (es *eventSourceTransport) send(upd *update) error {
 	sent := make(chan error)
 	go func() {
 		if es.isConnected {
-			sent <- eventsource.WriteEvent(es.w, eventsource.Event{
+			err := eventsource.WriteEvent(es.w, eventsource.Event{
 				ID:   strconv.FormatInt(upd.Version, 10),
 				Data: b,
 			})
+			if f, ok := es.w.(http.Flusher); ok {
+				log.Printf("flush")
+				f.Flush()
+			}
+			sent <- err
 		}
 	}()
 	select {

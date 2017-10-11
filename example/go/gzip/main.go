@@ -42,7 +42,10 @@ func main() {
 	}()
 	//sync handlers
 	http.Handle("/velox.js", velox.JS)
-	gzipper, _ := gziphandler.NewGzipLevelAndMinSize(gzip.DefaultCompression, 0)
+	//WARNING: minSize=0 is very important!
+	minSize := 0
+	gzipper, _ := gziphandler.NewGzipLevelAndMinSize(
+		gzip.DefaultCompression, minSize)
 	http.Handle("/sync", gzipper(velox.SyncHandler(foo)))
 	//index handler
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -60,7 +63,7 @@ var indexhtml = []byte(`
 <script src="/velox.js?dev=1"></script>
 <script>
 var foo = {};
-var v = velox.ws("/sync", foo);
+var v = velox("/sync", foo);
 v.onchange = function(isConnected) {
 	document.querySelector("#status").innerHTML = isConnected ? "connected" : "disconnected";
 };
