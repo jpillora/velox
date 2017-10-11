@@ -50,7 +50,6 @@ func (es *eventSourceTransport) send(upd *update) error {
 				Data: b,
 			})
 			if f, ok := es.w.(http.Flusher); ok {
-				log.Printf("flush")
 				f.Flush()
 			}
 			sent <- err
