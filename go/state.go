@@ -22,10 +22,14 @@ type Pusher interface {
 }
 
 var (
-	//15ms is approximately highest resolution on the JS eventloop
-	MinThrottle         = 15 * time.Millisecond
-	DefaultThrottle     = 200 * time.Millisecond
+	//MinThrottle is the minimum manual State.Throttle value.
+	//15ms is approximately highest resolution on the JS eventloop.
+	MinThrottle = 15 * time.Millisecond
+	//DefaultThrottle is the default State.Throttle value.
+	DefaultThrottle = 200 * time.Millisecond
+	//DefaultWriteTimeout is the default State.Throttle value.
 	DefaultWriteTimeout = 30 * time.Second
+	//DefaultPingInterval is the default State.PingInterval value.
 	DefaultPingInterval = 25 * time.Second
 )
 
@@ -71,11 +75,11 @@ func (s *State) init(gostruct interface{}) error {
 		l.Lock()
 		defer l.Unlock()
 	}
-	if b, err := json.Marshal(gostruct); err != nil {
+	b, err := json.Marshal(gostruct)
+	if err != nil {
 		return fmt.Errorf("JSON marshalling failed: %s", err)
-	} else {
-		s.data.bytes = b
 	}
+	s.data.bytes = b
 	id := make([]byte, 4)
 	if n, _ := rand.Read(id); n > 0 {
 		s.data.id = hex.EncodeToString(id)
@@ -127,6 +131,7 @@ func (s *State) subscribe(conn *conn) {
 	}()
 }
 
+//NumConnections currently active
 func (s *State) NumConnections() int {
 	s.connMut.Lock()
 	n := len(s.conns)
@@ -134,7 +139,7 @@ func (s *State) NumConnections() int {
 	return n
 }
 
-//Send the changes from this object to all connected clients.
+//Push the changes from this object to all connected clients.
 //Push is thread-safe and is throttled so it can be called
 //with abandon. Returns false if a Push is already in progress.
 func (s *State) Push() bool {

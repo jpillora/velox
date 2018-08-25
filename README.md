@@ -6,19 +6,19 @@ Real-time JS object synchronisation over SSE and WebSockets in Go and JavaScript
 
 ### Features
 
-* Simple API
-* Synchronise any JSON marshallable struct in Go
-* Synchronise any JSON stringifiable struct in Node
-* Delta updates using [JSONPatch (RFC6902)](https://tools.ietf.org/html/rfc6902)
-* Supports [Server-Sent Events (EventSource)](https://en.wikipedia.org/wiki/Server-sent_events) and [WebSockets](https://en.wikipedia.org/wiki/WebSocket)
-* SSE [client-side poly-fill](https://github.com/remy/polyfills/blob/master/EventSource.js) to fallback to long-polling in older browsers (IE8+).
-* Implement delta queries (return all results, then incrementally return changes)
+- Simple API
+- Synchronise any JSON marshallable struct in Go
+- Synchronise any JSON stringifiable struct in Node
+- Delta updates using [JSONPatch (RFC6902)](https://tools.ietf.org/html/rfc6902)
+- Supports [Server-Sent Events (EventSource)](https://en.wikipedia.org/wiki/Server-sent_events) and [WebSockets](https://en.wikipedia.org/wiki/WebSocket)
+- SSE [client-side poly-fill](https://github.com/remy/polyfills/blob/master/EventSource.js) to fallback to long-polling in older browsers (IE8+).
+- Implement delta queries (return all results, then incrementally return changes)
 
 ### Quick Usage
 
 Server (Go)
 
-``` go
+```go
 //syncable struct
 type Foo struct {
 	velox.State
@@ -38,17 +38,17 @@ foo.Push()
 
 Server (Node)
 
-``` js
+```js
 //syncable object
 let foo = {
-	a: 1,
-	b: 2
+  a: 1,
+  b: 2
 };
 //express server
 let app = express();
 //serve velox.js client library (assets/dist/velox.min.js)
 app.get("/velox.js", velox.JS);
-//serve velox sync endpoint for foo
+//serve velox sync endpoint for foo (adds $push method)
 app.get("/sync", velox.handle(foo));
 //make changes
 foo.a = 42;
@@ -59,12 +59,12 @@ foo.$push();
 
 Client (Node and Browser)
 
-``` js
+```js
 // load script /velox.js
 var foo = {};
 var v = velox("/sync", foo);
 v.onupdate = function() {
-	//foo.A === 42 and foo.B === 21
+  //foo.A === 42 and foo.B === 21
 };
 ```
 
@@ -76,23 +76,23 @@ Server API (Go)
 
 Server API (Node)
 
-* `velox.handle(object)` *function* returns `v` - Creates a new route handler for use with express
-* `velox.state(object)` *function* returns `state` - Creates or restores a velox state from a given object
-* `state.handle(req, res)` *function* returns `Promise` - Handle the provided `express` request/response. Resolves on connection close. Rejects on any error.
+- `velox.handle(object)` _function_ returns `v` - Creates a new route handler for use with express
+- `velox.state(object)` _function_ returns `state` - Creates or restores a velox state from a given object
+- `state.handle(req, res)` _function_ returns `Promise` - Handle the provided `express` request/response. Resolves on connection close. Rejects on any error.
 
 Client API (Node and Browser)
 
-* `velox(url, object)` *function* returns `v` - Creates a new SSE velox connection
-* `velox.sse(url, object)` *function* returns `v` - Creates a new SSE velox connection
-* `velox.ws(url, object)` *function* returns `v` - Creates a new WS velox connection
-* `v.onupdate(object)` *function* - Called when a server push is received
-* `v.onerror(err)` *function* - Called when a connection error occurs
-* `v.onconnect()` *function* - Called when the connection is opened
-* `v.ondisconnect()` *function* - Called when the connection is closed
-* `v.onchange(bool)` *function* - Called when the connection is opened or closed
-* `v.connected` *bool* - Denotes whether the connection is currently open
-* `v.ws` *bool* - Denotes whether the connection is in web sockets mode
-* `v.sse` *bool* - Denotes whether the connection is in server-sent events mode
+- `velox(url, object)` _function_ returns `v` - Creates a new SSE velox connection
+- `velox.sse(url, object)` _function_ returns `v` - Creates a new SSE velox connection
+- `velox.ws(url, object)` _function_ returns `v` - Creates a new WS velox connection
+- `v.onupdate(object)` _function_ - Called when a server push is received
+- `v.onerror(err)` _function_ - Called when a connection error occurs
+- `v.onconnect()` _function_ - Called when the connection is opened
+- `v.ondisconnect()` _function_ - Called when the connection is closed
+- `v.onchange(bool)` _function_ - Called when the connection is opened or closed
+- `v.connected` _bool_ - Denotes whether the connection is currently open
+- `v.ws` _bool_ - Denotes whether the connection is in web sockets mode
+- `v.sse` _bool_ - Denotes whether the connection is in server-sent events mode
 
 ### Example
 
@@ -100,38 +100,38 @@ See this [simple `example/`](example/) and view it live here: https://velox.jpil
 
 ![screenshot](https://cloud.githubusercontent.com/assets/633843/13481947/8eea1804-e13d-11e5-80c8-be9317c54fbc.png)
 
-*Here is a screenshot from this example page, showing the messages arriving as either a full replacement of the object or just a delta. The server will send which ever is smaller.*
+_Here is a screenshot from this example page, showing the messages arriving as either a full replacement of the object or just a delta. The server will send which ever is smaller._
 
 ### Notes
 
-* JS object properties beginning with `$` will be ignored to play nice with Angular.
-* JS object with an `$apply` function will automatically be called on each update to play nice with Angular.
-* `velox.SyncHandler` is just a small wrapper around `velox.Sync`:
+- JS object properties beginning with `$` will be ignored to play nice with Angular.
+- JS object with an `$apply` function will automatically be called on each update to play nice with Angular.
+- `velox.SyncHandler` is just a small wrapper around `velox.Sync`:
 
-	```go
-	func SyncHandler(gostruct interface{}) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if conn, err := Sync(gostruct, w, r); err == nil {
-				conn.Wait()
-			}
-		})
-	}
-	```
+      	```go
+      	func SyncHandler(gostruct interface{}) http.Handler {
+      		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+      			if conn, err := Sync(gostruct, w, r); err == nil {
+      				conn.Wait()
+      			}
+      		})
+      	}
+      	```
 
 ### Known issues
 
-* Object synchronization is currently one way (server to client) only.
-* Object diff has not been optimized. It is a simple property-by-property comparison.
+- Object synchronization is currently one way (server to client) only.
+- Object diff has not been optimized. It is a simple property-by-property comparison.
 
 ### TODO
 
-* WebRTC support
-* Plain [`http`](https://nodejs.org/api/http.html#http_http_createserver_requestlistener) server support in Node
-* WebSockets support in Node
+- WebRTC support
+- Plain [`http`](https://nodejs.org/api/http.html#http_http_createserver_requestlistener) server support in Node
+- WebSockets support in Node
 
 #### MIT License
 
-Copyright © 2017 Jaime Pillora &lt;dev@jpillora.com&gt;
+Copyright © 2018 Jaime Pillora &lt;dev@jpillora.com&gt;
 
 Permission is hereby granted, free of charge, to any person obtaining
 a copy of this software and associated documentation files (the

@@ -9,6 +9,7 @@ import (
 	"strings"
 )
 
+//JS is an HTTP handler serving the velox.js frontend library
 var JS = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 	filename := "bundle.js"
 	b, _ := Asset(filename)

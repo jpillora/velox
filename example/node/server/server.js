@@ -6,7 +6,7 @@ let foo = {
   a: 42,
   b: 7
 };
-app.get("/sync", velox.handle(foo));
+app.get("/sync", velox.handle(foo, { debug: true }));
 //serve files
 app.get("/velox.js", velox.js);
 app.get("/", (req, res) => res.sendFile(__dirname + "/client.html"));
