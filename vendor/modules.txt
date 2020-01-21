@@ -1,0 +1,2 @@
+# gomodules.xyz/jsonpatch/v2 v2.0.1
+gomodules.xyz/jsonpatch/v2

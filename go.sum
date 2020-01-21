@@ -1,9 +1,15 @@
+github.com/NYTimes/gziphandler v1.1.1 h1:ZUDjpQae29j0ryrS0u/B8HZfJBtBQHjqw2rQ2cqUQ3I=
+github.com/NYTimes/gziphandler v1.1.1/go.mod h1:n/CVRwUEOgIxrgPvAQhUUr9oeUtvrhMomdKFjzJNB0c=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/evanphx/json-patch v4.5.0+incompatible/go.mod h1:50XU6AFN0ol/bzJsmQLiYLvXMP4fmwYFNcr97nuDLSk=
 github.com/gorilla/websocket v1.4.1 h1:q7AeDBpnBk8AogcD4DSag/Ukw/KV+YhzLj2bP5HvKCM=
 github.com/gorilla/websocket v1.4.1/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
 github.com/jpillora/eventsource v0.0.0-20170920003432-7ed8c999e167 h1:e+b0kVgqckdJnfgmJM8vqG6PnyRbdhI26tVfCNf3kMw=
 github.com/jpillora/eventsource v0.0.0-20170920003432-7ed8c999e167/go.mod h1:qaSVvI/JUZarbxO3OwihjLyh9SO49T1cGjUeyIheDAs=
+github.com/jpillora/gziphandler v0.0.0-20160809064017-05827a72141f h1:wYi+1eiJpjCJsTrilyh+FkgYPDAczq6YhOmONH73m94=
+github.com/jpillora/gziphandler v0.0.0-20160809064017-05827a72141f/go.mod h1:eoXTPN7UJHOboTBR4JVNOo27ufpcircMvbDt+gU9aRc=
+github.com/jpillora/sizestr v0.0.0-20160130011556-e2ea2fa42fb9 h1:0c9jcgBtHRtDU//jTrcCgWG6UHjMZytiq/3WhraNgUM=
+github.com/jpillora/sizestr v0.0.0-20160130011556-e2ea2fa42fb9/go.mod h1:1ffp+CRe0eAwwRb0/BownUAjMBsmTLwgAvRbfj9dRwE=
 github.com/jpillora/velox v0.0.0-20180825063758-42845d323220 h1:/Vd3hZfOq+NZuY9OQ2pQ/dN8O1J2Kx4x77jmCIxpAQk=
 github.com/jpillora/velox v0.0.0-20180825063758-42845d323220/go.mod h1:ql/Vc4cQrLfCUIccPRpchZMhTcbnXBXUAvMglI6z3yQ=
 github.com/mattbaird/jsonpatch v0.0.0-20171005235357-81af80346b1a h1:+J2gw7Bw77w/fbK7wnNJJDKmw1IbWft2Ul5BzrG1Qm8=
