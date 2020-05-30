@@ -49,7 +49,7 @@ func main() {
 			if i%2 == 0 {
 				j := 0
 				rmj := rand.Intn(len(foo.C))
-				for k, _ := range foo.C {
+				for k := range foo.C {
 					if j == rmj {
 						delete(foo.C, k)
 						break
@@ -126,8 +126,8 @@ v.onupdate = function() {
 <hr>
 
 Server:<br>
-<a href="https://github.com/jpillora/velox/blob/master/example/demo/main.go" target="_blank">
-	https://github.com/jpillora/velox/blob/master/example/demo/main.go
+<a href="https://github.com/jpillora/velox/blob/master/example/go/demo/main.go" target="_blank">
+https://github.com/jpillora/velox/blob/master/example/go/demo/main.go
 </a>
 <hr>
 
