@@ -28,7 +28,7 @@
     "lodash": "^4.17.15",
     "ssestream": "^1.0.1",
     "url-parse": "^1.4.7",
-    "ws": "^6.2.1"
+    "ws": "^7.4.5"
   },
   "devDependencies": {
     "babel-core": "^6.26.3",
