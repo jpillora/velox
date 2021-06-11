@@ -49,9 +49,6 @@ func (es *eventSourceTransport) send(upd *update) error {
 				ID:   strconv.FormatInt(upd.Version, 10),
 				Data: b,
 			})
-			if f, ok := es.w.(http.Flusher); ok {
-				f.Flush()
-			}
 			sent <- err
 		}
 	}()
