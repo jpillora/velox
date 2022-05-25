@@ -23,7 +23,7 @@
     "backo": "^1.1.0",
     "compression": "^1.7.4",
     "event-source-polyfill": "0.0.9",
-    "eventsource": "^1.0.7",
+    "eventsource": "^2.0.2",
     "fast-json-patch": "^3.0.0-1",
     "lodash": "^4.17.15",
     "ssestream": "^1.0.1",
