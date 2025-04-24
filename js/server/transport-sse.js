@@ -1,4 +1,4 @@
-const SseStream = require("ssestream");
+const SseStream = require("ssestream").default;
 const throttle = require("lodash/throttle");
 
 let connectionCount = 0;
@@ -33,15 +33,15 @@ module.exports = class EventSourceTransport {
   writeAs(event, data) {
     return new Promise((resolve, _) => {
       //attempt write
+      console.log("writing", event, data);
       this.s.write(
         {
           id: ++this.eventId,
-          event: event,
-          data: data
+          data: data,
         },
         () => {
           //written!
-          if (this.res.get("Content-Encoding") === "gzip") {
+          if (this.res.get("Content-Encoding")) {
             this.flush();
           }
           resolve();

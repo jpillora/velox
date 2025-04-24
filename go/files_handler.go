@@ -1,29 +1,24 @@
-//go:generate go-bindata -pkg velox -o files.go -prefix ../js/build/ ../js/build/bundle.js
-
 package velox
 
 import (
-	"bytes"
-	"compress/gzip"
 	"net/http"
-	"strings"
+
+	buildfiles "github.com/jpillora/velox/js/build"
 )
 
-//JS is an HTTP handler serving the velox.js frontend library
+var fs = http.FS(buildfiles.FS)
+
+// JS is an HTTP handler serving the velox.js frontend library
 var JS = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 	filename := "bundle.js"
-	b, _ := Asset(filename)
-	info, _ := AssetInfo(filename)
-	//requested compression and not already compressed?
-	if strings.Contains(req.Header.Get("Accept-Encoding"), "gzip") && w.Header().Get("Content-Encoding") != "gzip" {
-		gb := bytes.Buffer{}
-		g := gzip.NewWriter(&gb)
-		g.Write(b)
-		g.Close()
-		b = gb.Bytes()
-		w.Header().Set("Content-Encoding", "gzip")
+	f, err := fs.Open(filename)
+	if err != nil {
+		panic(err)
 	}
-	buff := bytes.NewReader(b)
+	s, err := f.Stat()
+	if err != nil {
+		panic(err)
+	}
 	//serve
-	http.ServeContent(w, req, info.Name(), info.ModTime(), buff)
+	http.ServeContent(w, req, s.Name(), s.ModTime(), f)
 })

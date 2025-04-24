@@ -16,26 +16,21 @@
   },
   "homepage": "https://github.com/jpillora/velox#readme",
   "scripts": {
-    "build": "./node_modules/.bin/webpack --config js/webpack.config.js && echo built && go generate ./go && echo embedded",
-    "build-dev": "./node_modules/.bin/webpack --config js/webpack.config.js --devtool source-map"
+    "build": "esbuild js/client/entry-browser.js --bundle --minify --sourcemap --target=chrome58,firefox57,safari11,edge16 > js/build/bundle.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.3",
+    "event-source-polyfill": "0.0.9",
+    "json-merge-patch": "^1.0.2"
   },
   "dependencies": {
     "backo": "^1.1.0",
     "compression": "^1.7.4",
-    "event-source-polyfill": "0.0.9",
     "eventsource": "^1.0.7",
-    "fast-json-patch": "^3.0.0-1",
+    "fast-json-patch": "^3.1.1",
     "lodash": "^4.17.15",
     "ssestream": "^1.0.1",
     "url-parse": "^1.4.7",
     "ws": "^6.2.1"
-  },
-  "devDependencies": {
-    "babel-core": "^6.26.3",
-    "babel-loader": "^7.1.5",
-    "babel-preset-env": "^1.7.0",
-    "uglifyjs-webpack-plugin": "^0.4.6",
-    "webpack": "^4.41.5",
-    "webpack-cli": "^3.3.10"
   }
 }

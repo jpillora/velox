@@ -1,31 +1,72 @@
 package main
 
 import (
+	"crypto/md5"
+	"encoding/json"
+	"fmt"
 	"log"
 	"math/rand"
 	"net/http"
 	"os"
-	"runtime"
+	"strconv"
 	"sync"
 	"time"
+
+	_ "embed"
 
 	"github.com/jpillora/velox"
 )
 
-//debug enables goroutine and memory counters
-const debug = false
+//go:embed index.html
+var indexHTML string
 
-type Foo struct {
+type Root struct {
 	//required velox state, adds sync state and a Push() method
 	velox.State
 	//optional mutex, prevents race conditions (foo.Push will make use of the sync.Locker interface)
 	sync.Mutex
+	Users  `json:"users"`
+	Random `json:"random"`
+}
+
+type User struct {
+	Updated time.Time
+	ID      string
+	MouseX  int
+	MouseY  int
+}
+
+type Users struct {
 	NumConnections int
-	NumGoRoutines  int     `json:",omitempty"`
-	AllocMem       float64 `json:",omitempty"`
-	A, B           int
-	C              map[string]int
-	D              Bar
+	Active         map[string]*User
+}
+
+func (s *Root) getUser(w http.ResponseWriter, r *http.Request) *User {
+	id := ""
+	if c, err := r.Cookie("id"); err == nil {
+		id = c.Value
+	} else {
+		id = randID()
+		http.SetCookie(w, &http.Cookie{Name: "id", Value: id, Expires: time.Now().Add(time.Hour)})
+	}
+	s.Lock()
+	// clean out inactive
+	for id2, u := range s.Users.Active {
+		if time.Since(u.Updated) > 5*time.Minute {
+			delete(s.Users.Active, id2)
+		}
+	}
+	u, ok := s.Users.Active[id]
+	if !ok {
+		u = &User{ID: id}
+		s.Users.Active[id] = u
+	}
+	s.Unlock()
+	return u
+}
+
+type Random struct {
+	Data map[string]int
 }
 
 type Bar struct {
@@ -34,64 +75,50 @@ type Bar struct {
 
 func main() {
 	//state we wish to sync
-	foo := &Foo{A: 21, B: 42, C: map[string]int{}}
+	root := &Root{
+		State: velox.State{
+			// you should normally throttle updates to 1-2 seconds
+			Throttle: 20 * time.Millisecond,
+		},
+		Users: Users{
+			Active: map[string]*User{},
+		},
+		Random: Random{Data: map[string]int{}},
+	}
 	go func() {
-		i := 0
 		for {
 			//change foo
-			foo.Lock()
-			foo.A++
-			if i%2 == 0 {
-				foo.B--
-			}
-			i++
-			foo.C[string('A'+rand.Intn(26))] = i
-			if i%2 == 0 {
-				j := 0
-				rmj := rand.Intn(len(foo.C))
-				for k := range foo.C {
-					if j == rmj {
-						delete(foo.C, k)
-						break
-					}
-					j++
-				}
-			}
-			if i%5 == 0 {
-				foo.D.X--
-				foo.D.Y++
-			}
-			foo.NumConnections = foo.State.NumConnections() //show number of connections 'foo' is currently handling
-			foo.Unlock()
-			//push to all connections
-			foo.Push()
+			root.Lock()
+			root.Users.NumConnections = root.State.NumConnections() //show number of connections 'foo' is currently handling
+			root.Data[string(rune('A'+rand.Intn(26)))] = rand.Intn(26)
+			root.Unlock()
+			root.Push()
 			//do other stuff...
 			time.Sleep(250 * time.Millisecond)
 		}
 	}()
-	//show memory/goroutine stats
-	if debug {
-		go func() {
-			mem := &runtime.MemStats{}
-			i := 0
-			for {
-				foo.NumGoRoutines = runtime.NumGoroutine()
-				runtime.ReadMemStats(mem)
-				foo.AllocMem = float64(mem.Alloc)
-				time.Sleep(100 * time.Millisecond)
-				i++
-				// if i%10 == 0 { runtime.GC() }
-				foo.Push()
-			}
-		}()
-	}
 	//sync handlers
 	http.Handle("/velox.js", velox.JS)
-	http.Handle("/sync", velox.SyncHandler(foo))
+	http.Handle("/sync", velox.SyncHandler(root))
+	http.Handle("/ping", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u := root.getUser(w, r)
+		q := r.URL.Query()
+		root.Lock()
+		u.Updated = time.Now()
+		u.MouseX, _ = strconv.Atoi(q.Get("x"))
+		u.MouseY, _ = strconv.Atoi(q.Get("y"))
+		root.Unlock()
+		root.Push()
+	}))
+	http.Handle("/root", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := json.MarshalIndent(root, "", "  ")
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write(b)
+	}))
 	//index handler
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		w.Write(indexhtml)
+		w.Write([]byte(indexHTML))
 	})
 	//listen!
 	port := os.Getenv("PORT")
@@ -105,44 +132,8 @@ func main() {
 	log.Fatal(s.ListenAndServe())
 }
 
-var indexhtml = []byte(`
-<!-- documentation -->
-Client:<br>
-<pre id="code">Status: &lt;div>&lt;b id="status">disconnected&lt;/b>&lt;/div>
-&lt;pre id="example">&lt;/pre>
-&lt;script src="/velox.js">&lt;/script>
-&lt;script>
-var foo = {};
-var v = velox("/sync", foo);
-v.onchange = function(isConnected) {
-	document.querySelector("#status").innerHTML = isConnected ? "connected" : "disconnected";
-};
-v.onupdate = function() {
-	document.querySelector("#example").innerHTML = JSON.stringify(foo, null, 2);
-};
-&lt;/script>
-</pre>
-<a href="https://github.com/jpillora/velox"><img style="position: absolute; z-index: 2; top: 0; right: 0; border: 0;" src="https://s3.amazonaws.com/github/ribbons/forkme_right_darkblue_121621.png" alt="Fork me on GitHub"></a>
-<hr>
-
-Server:<br>
-<a href="https://github.com/jpillora/velox/blob/master/example/go/demo/main.go" target="_blank">
-https://github.com/jpillora/velox/blob/master/example/go/demo/main.go
-</a>
-<hr>
-
-<!-- example -->
-<div>Status: <b id="status">disconnected</b></div>
-<pre id="example"></pre>
-<script src="/velox.js?dev=1"></script>
-<script>
-var foo = {};
-var v = velox("/sync", foo);
-v.onchange = function(isConnected) {
-	document.querySelector("#status").innerHTML = isConnected ? "connected" : "disconnected";
-};
-v.onupdate = function() {
-	document.querySelector("#example").innerHTML = JSON.stringify(foo, null, 2);
-};
-</script>
-`)
+func randID() string {
+	h := md5.Sum([]byte(time.Now().Format(time.RFC3339Nano)))
+	id := fmt.Sprintf("%x", h[0:4])
+	return id
+}

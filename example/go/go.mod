@@ -1,13 +1,17 @@
-module examples
+module github.com/jpillora/velox/example/go
 
-go 1.13
+go 1.24.2
 
-replace github.com/jpillora/velox => ../../
+replace github.com/jpillora/velox => ../..
 
 require (
 	github.com/NYTimes/gziphandler v1.1.1
-	github.com/jpillora/gziphandler v0.0.0-20160809064017-05827a72141f
 	github.com/jpillora/sizestr v1.0.0
-	github.com/jpillora/velox v0.0.0-20180825063758-42845d323220
-	github.com/mattbaird/jsonpatch v0.0.0-20171005235357-81af80346b1a // indirect
+	github.com/jpillora/velox v0.4.1
+)
+
+require (
+	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
+	github.com/jpillora/eventsource v1.1.0 // indirect
 )

@@ -5,12 +5,14 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/jpillora/eventsource"
 )
 
 type eventSourceTransport struct {
+	mut          sync.Mutex
 	writeTimeout time.Duration
 	w            http.ResponseWriter
 	isConnected  bool
@@ -37,14 +39,14 @@ func (es *eventSourceTransport) connect(w http.ResponseWriter, r *http.Request) 
 	return nil
 }
 
-func (es *eventSourceTransport) send(upd *update) error {
+func (es *eventSourceTransport) send(upd *Update) error {
 	b, err := json.Marshal(upd)
 	if err != nil {
 		return err
 	}
 	sent := make(chan error)
 	go func() {
-		if es.isConnected {
+		if es.IsConnected() {
 			err := eventsource.WriteEvent(es.w, eventsource.Event{
 				ID:   strconv.FormatInt(upd.Version, 10),
 				Data: b,
@@ -65,11 +67,20 @@ func (es *eventSourceTransport) wait() error {
 	return nil
 }
 
+func (es *eventSourceTransport) IsConnected() bool {
+	es.mut.Lock()
+	defer es.mut.Unlock()
+	return es.isConnected
+}
+
 func (es *eventSourceTransport) close() error {
-	if es.isConnected {
+	if es.IsConnected() {
 		//unblocking the wait, causes the http handler to return
 		close(es.connected)
+
+		es.mut.Lock()
 		es.isConnected = false
+		es.mut.Unlock()
 	}
 	return nil
 }

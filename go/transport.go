@@ -5,8 +5,8 @@ import (
 	"net/http"
 )
 
-//a single update
-type update struct {
+// Update is a single message sent to the client
+type Update struct {
 	ID      string          `json:"id,omitempty"`
 	Ping    bool            `json:"ping,omitempty"`
 	Delta   bool            `json:"delta,omitempty"`
@@ -16,7 +16,7 @@ type update struct {
 
 type transport interface {
 	connect(w http.ResponseWriter, r *http.Request) error
-	send(upd *update) error
+	send(upd *Update) error
 	wait() error
 	close() error
 }

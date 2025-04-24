@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>velox demo</title>
+    <style>
+      body {
+        background-color: #333;
+        color: white;
+        font-family: "Nimbus Mono PS", "Courier New", monospace;
+        cursor: crosshair;
+      }
+    </style>
+  </head>
+  <body>
+    <div>Status: <b id="status">disconnected</b></div>
+    <pre id="example"></pre>
+    <div id="users"></div>
+    <script src="/velox.js?dev=1"></script>
+    <script>
+      // connection
+      var root = {};
+      var v = velox("/sync", root);
+      v.onchange = function (isConnected) {
+        document.querySelector("#status").innerHTML = isConnected
+          ? "connected"
+          : "disconnected";
+      };
+      // display state as JSON
+      v.onupdate = function () {
+        document.querySelector("#example").innerHTML = JSON.stringify(
+          root,
+          null,
+          2
+        );
+        // and draw user cursors on the screen
+        if (root.users && root.users.Active) {
+          for (const u of Object.values(root.users.Active)) {
+            const e = upsertUserElem(u.ID);
+            if (u.MouseY > 0) {
+              e.style.top = `${u.MouseY}px`;
+            }
+            if (u.MouseX > 0) {
+              e.style.left = `${u.MouseX}px`;
+            }
+          }
+        }
+      };
+      function colorAngle(str) {
+        let hash = 0;
+        for (var i = 0; i < str.length; i++) {
+          hash = str.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        return hash % 360;
+      }
+      // update user circle position
+      function upsertUserElem(id) {
+        const cont = document.querySelector("#users");
+        let e = cont.querySelector(`#user-${id}`);
+        if (e) {
+          return e;
+        }
+        e = document.createElement("div");
+        e.id = `user-${id}`;
+        e.style.color = "#333";
+        e.style.position = "absolute";
+        e.style.transition = "all 0.1s ease";
+        {
+          const t = document.createElement("div");
+          t.textContent = id;
+          t.style.padding = "0 10px";
+          t.style.background = `hsl(${colorAngle(id)}, 100%, 75%)`;
+          t.style.borderRadius = "10px";
+          t.style.position = "absolute";
+          t.style.top = "10px";
+          t.style.left = "20px";
+          e.append(t);
+        }
+        {
+          const c = document.createElement("img");
+          c.src = `data:image/png;base64,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`;
+          c.style.position = "absolute";
+          c.style.top = "-10px";
+          c.style.left = "-5px";
+          c.style.transform = "scale(0.5)";
+          e.append(c);
+        }
+        cont.append(e);
+        return e;
+      }
+      // pass user mouse position back to the server
+      let pinging = false;
+      window.addEventListener("mousemove", function (event) {
+        if (!pinging) {
+          pinging = true;
+          fetch(`/ping?x=${event.pageX}&y=${event.pageY}`).finally(() => {
+            pinging = false;
+          });
+        }
+      });
+    </script>
+  </body>
+</html>

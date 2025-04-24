@@ -8,16 +8,13 @@ import (
 	"sync/atomic"
 )
 
-//NOTE(@jpillora): always assume v1, include v2 in checks when we get there...
-const proto = "v1"
-
 type syncer interface {
 	sync(gostruct interface{}) (*State, error)
 }
 
-//SyncHandler is a small wrapper around Sync which simply synchronises
-//all incoming connections. Use Sync if you wish to implement user authentication
-//or any other request-time checks.
+// SyncHandler is a small wrapper around Sync which simply synchronises
+// all incoming connections. Use Sync if you wish to implement user authentication
+// or any other request-time checks.
 func SyncHandler(gostruct interface{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if conn, err := Sync(gostruct, w, r); err != nil {
@@ -30,10 +27,10 @@ func SyncHandler(gostruct interface{}) http.Handler {
 
 var connectionID int64
 
-//Sync upgrades a given HTTP connection into a velox connection and synchronises
-//the provided struct with the client. velox takes responsibility for writing the response
-//in the event of failure. Default handlers close the TCP connection on return so when
-//manually using this method, you'll most likely want to block using Conn.Wait().
+// Sync upgrades a given HTTP connection into a velox connection and synchronises
+// the provided struct with the client. velox takes responsibility for writing the response
+// in the event of failure. Default handlers close the TCP connection on return so when
+// manually using this method, you'll most likely want to block using Conn.Wait().
 func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, error) {
 	//access gostruct.State via interfaces:
 	gosyncable, ok := gostruct.(syncer)

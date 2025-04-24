@@ -31,7 +31,7 @@ func (ws *websocketsTransport) connect(w http.ResponseWriter, r *http.Request) e
 	return nil
 }
 
-func (ws *websocketsTransport) send(upd *update) error {
+func (ws *websocketsTransport) send(upd *Update) error {
 	ws.conn.SetWriteDeadline(time.Now().Add(ws.writeTimeout))
 	return ws.conn.WriteJSON(upd)
 }

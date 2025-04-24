@@ -41,6 +41,7 @@ func main() {
 	}()
 	//sync handlers
 	http.Handle("/velox.js", velox.JS)
+	http.Handle("/bundle.js.map", velox.JS)
 	http.Handle("/sync", velox.SyncHandler(foo))
 	//index handler
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

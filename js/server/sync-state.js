@@ -1,10 +1,10 @@
 const Connection = require("./connection");
 const throttle = require("lodash/throttle");
 const compressor = require("compression")();
-const jsonpatch = require("fast-json-patch");
+const jsonmergepatch = require("json-merge-patch");
 const crypto = require("crypto");
 
-exports.state = function(obj, opts) {
+exports.state = function (obj, opts) {
   if (!obj || typeof obj !== "object") {
     throw new Error("velox: can only sync objects");
   }
@@ -53,7 +53,7 @@ class SyncState {
     //connect this request to the sync state
     let conn = new Connection(this);
     //perform sse/websocket handshake
-    if (!await conn.setup(req, res)) {
+    if (!(await conn.setup(req, res))) {
       return;
     }
     //block here and subscribe to changes
@@ -61,18 +61,19 @@ class SyncState {
   }
 
   push() {
-    let currObj = jsonpatch.deepClone(this.obj);
-    let json = JSON.stringify(currObj);
+    let json = JSON.stringify(this.obj);
     if (this.json === json) {
       return;
     }
     this.version++;
-    //compute diff
+    //compute diff (from 2nd push onwards)
     if (this.prevObj) {
-      this.delta = JSON.stringify(jsonpatch.compare(this.prevObj, currObj));
+      this.delta = JSON.stringify(
+        jsonmergepatch.generate(this.prevObj, this.obj)
+      );
     }
+    this.prevObj = JSON.parse(json); // save previous state
     this.json = json;
-    this.prevObj = currObj;
     //push to all subscribers
     for (let i = 0; i < this.subscribers.length; i++) {
       let conn = this.subscribers[i];

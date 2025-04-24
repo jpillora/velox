@@ -12,11 +12,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gomodules.xyz/jsonpatch/v3"
+	jsonpatch "github.com/evanphx/json-patch/v5"
 )
 
-//Pusher implements a push method,
-//similar to Flush
+// Pusher implements a push method,
+// similar to Flush
 type Pusher interface {
 	Push() bool
 }
@@ -33,19 +33,21 @@ var (
 	DefaultPingInterval = 25 * time.Second
 )
 
-//State must be embedded into a struct to make it syncable.
+// State must be embedded into a struct to make it syncable.
 type State struct {
 	//configuration
 	Throttle     time.Duration `json:"-"`
 	WriteTimeout time.Duration `json:"-"`
 	PingInterval time.Duration `json:"-"`
+	Debug        bool          `json:"-"`
 	//internal state
-	initMut  sync.Mutex
-	initd    bool
-	gostruct interface{}
-	connMut  sync.Mutex
-	conns    map[int64]*conn
-	data     struct {
+	initMut     sync.Mutex
+	initd       bool
+	localMut    sync.Locker
+	localStruct interface{}
+	connMut     sync.Mutex
+	conns       map[int64]*conn
+	data        struct {
 		mut     sync.RWMutex
 		id      string //data id != conn id
 		bytes   []byte
@@ -70,34 +72,38 @@ func (s *State) init(gostruct interface{}) error {
 		s.PingInterval = DefaultPingInterval
 	}
 	//get initial JSON bytes and confirm gostruct is marshallable
-	l, ok := gostruct.(sync.Locker)
-	if ok {
-		l.Lock()
-		defer l.Unlock()
+	if l, ok := gostruct.(sync.Locker); ok {
+		s.localMut = l
+		s.localMut.Lock()
+		defer s.localMut.Unlock()
 	}
 	b, err := json.Marshal(gostruct)
 	if err != nil {
 		return fmt.Errorf("JSON marshalling failed: %s", err)
 	}
+	s.data.mut.Lock()
 	s.data.bytes = b
 	id := make([]byte, 4)
 	if n, _ := rand.Read(id); n > 0 {
 		s.data.id = hex.EncodeToString(id)
 	}
-	s.gostruct = gostruct
+	s.localStruct = gostruct
 	s.data.version = 1
+	s.data.mut.Unlock()
+	s.connMut.Lock()
 	s.conns = map[int64]*conn{}
+	s.connMut.Unlock()
 	s.initd = true
 	return nil
 }
 
-//ID uniquely identifies this state object
+// ID uniquely identifies this state object
 func (s *State) ID() string {
 	return s.data.id
 }
 
-//Version of this state object (when the underlying struct is
-//and a Push is performed, this version number is incremented).
+// Version of this state object (when the underlying struct is
+// and a Push is performed, this version number is incremented).
 func (s *State) Version() int64 {
 	return s.data.version
 }
@@ -109,8 +115,8 @@ func (s *State) sync(gostruct interface{}) (*State, error) {
 		if err := s.init(gostruct); err != nil {
 			return nil, err
 		}
-	} else if s.gostruct != gostruct {
-		return nil, errors.New("A different struct is already synced")
+	} else if s.localStruct != gostruct {
+		return nil, errors.New("a different struct is already synced")
 	}
 	return s, nil
 }
@@ -131,7 +137,7 @@ func (s *State) subscribe(conn *conn) {
 	}()
 }
 
-//NumConnections currently active
+// NumConnections currently active
 func (s *State) NumConnections() int {
 	s.connMut.Lock()
 	n := len(s.conns)
@@ -139,9 +145,9 @@ func (s *State) NumConnections() int {
 	return n
 }
 
-//Push the changes from this object to all connected clients.
-//Push is thread-safe and is throttled so it can be called
-//with abandon. Returns false if a Push is already in progress.
+// Push the changes from this object to all connected clients.
+// Push is thread-safe and is throttled so it can be called
+// with abandon. Returns false if a Push is already in progress.
 func (s *State) Push() bool {
 	//attempt to mark state as 'pushing'
 	if atomic.CompareAndSwapUint32(&s.push.ing, 0, 1) {
@@ -153,14 +159,14 @@ func (s *State) Push() bool {
 	return false
 }
 
-//non-blocking push
+// non-blocking push
 func (s *State) gopush() {
 	s.push.mut.Lock()
 	t0 := time.Now()
 	//queue cleanup
 	defer func() {
 		//measure time passed, ensure we wait at least Throttle time
-		tdelta := time.Now().Sub(t0)
+		tdelta := time.Since(t0)
 		if t := s.Throttle - tdelta; t > 0 {
 			time.Sleep(t)
 		}
@@ -173,36 +179,54 @@ func (s *State) gopush() {
 		}
 	}()
 	//calculate new json state
-	l, hasLock := s.gostruct.(sync.Locker)
-	if hasLock {
-		l.Lock()
+	if s.localMut != nil {
+		s.localMut.Lock()
 	}
-	newBytes, err := json.Marshal(s.gostruct)
-	if hasLock {
-		l.Unlock()
+	newBytes, err := json.Marshal(s.localStruct)
+	if s.localMut != nil {
+		s.localMut.Unlock()
 	}
 	if err != nil {
 		log.Printf("velox: marshal failed: %s", err)
 		return
 	}
-	//if changed, then calculate change set
-	if !bytes.Equal(s.data.bytes, newBytes) {
-		//calculate change set from last version
-		ops, _ := jsonpatch.CreatePatch(s.data.bytes, newBytes)
-		if len(s.data.bytes) > 0 && len(ops) > 0 {
-			//changes! bump version
-			s.data.mut.Lock()
-			s.data.delta, _ = json.Marshal(ops)
+	s.data.mut.Lock()
+	changed := false
+	if bytes.Equal(newBytes, []byte("null")) {
+		// special case, clear data
+		s.data.bytes = nil
+		s.data.delta = nil
+		changed = true
+	} else {
+		// ensure non-nil
+		if s.data.bytes == nil {
+			s.data.bytes = []byte(`{}`)
+		}
+		// steps to go from local to remote, capture changes
+		delta, err := jsonpatch.CreateMergePatch(s.data.bytes, newBytes)
+		if err != nil {
+			panic(fmt.Errorf("create-patch: %w", err))
+		}
+		// if changed,
+		if !bytes.Equal(delta, []byte(`{}`)) && len(delta) > 0 {
+			// then calculate change set from last version
+			// NOTE: patch may contain references to localStruct
+			s.data.delta = delta
 			s.data.bytes = newBytes
-			s.data.version++
-			s.data.mut.Unlock()
+			changed = true
 		}
 	}
+	// bump if changed
+	if changed {
+		s.data.version++
+	}
+	dversion := s.data.version
+	s.data.mut.Unlock()
 	//send this new change to each subscriber
 	s.connMut.Lock()
 	for _, c := range s.conns {
-		if c.version != s.data.version {
-			go c.push()
+		if c.Version() != dversion {
+			go c.Push()
 		}
 	}
 	s.connMut.Unlock()

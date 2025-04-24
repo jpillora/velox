@@ -4,7 +4,7 @@ const app = express();
 //convert foo into a syncable object (adds a $push function)
 let foo = {
   a: 42,
-  b: 7
+  b: 7,
 };
 app.get("/sync", velox.handle(foo, { debug: true }));
 //serve files

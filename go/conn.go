@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-//Conn represents a single live connection being synchronised.
-//ID is current set to the connection's remote address.
+// Conn represents a single live connection being synchronised.
+// ID is current set to the connection's remote address.
 type Conn interface {
 	ID() string
 	Connected() bool
@@ -23,6 +23,7 @@ type conn struct {
 	transport   transport
 	state       *State
 	connected   bool
+	connectedAt time.Time
 	connectedCh chan struct{}
 	waiter      sync.WaitGroup
 	id          int64
@@ -30,9 +31,8 @@ type conn struct {
 	first       uint32
 	pushing     uint32
 	queued      uint32
-	uptime      time.Time
+	sendVerMut  sync.Mutex // serialises send, protects version
 	version     int64
-	sendingMut  sync.Mutex //for msg/ping
 }
 
 func newConn(id int64, addr string, state *State, version int64) *conn {
@@ -45,34 +45,35 @@ func newConn(id int64, addr string, state *State, version int64) *conn {
 	}
 }
 
-//ID of this connection
+// ID of this connection
 func (c *conn) ID() string {
 	return strconv.FormatInt(c.id, 10)
 }
 
-//Status of this connection, should be true initially, then false after Wait().
+// Status of this connection, should be true initially, then false after Wait().
 func (c *conn) Connected() bool {
 	return c.connected
 }
 
-//Wait will block until the connection is closed.
+// Read the current version
+func (c *conn) Version() int64 {
+	c.sendVerMut.Lock()
+	defer c.sendVerMut.Unlock()
+	return c.version
+}
+
+// Wait will block until the connection is closed.
 func (c *conn) Wait() {
 	c.waiter.Wait()
 }
 
-//Push will the current state only to this client.
-//Blocks until push is complete.
-func (c *conn) Push() {
-	c.push()
-}
-
-//Force close the connection.
+// Force close the connection.
 func (c *conn) Close() error {
 	return c.transport.close()
 }
 
-//connect using the provided transport
-//and block until connection is ready
+// connect using the provided transport
+// and block until connection is ready
 func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 	//choose transport
 	if r.Header.Get("Accept") == "text/event-stream" {
@@ -80,25 +81,26 @@ func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 	} else if r.Header.Get("Upgrade") == "websocket" {
 		c.transport = &websocketsTransport{writeTimeout: c.state.WriteTimeout}
 	} else {
-		return fmt.Errorf("Invalid sync request")
+		return fmt.Errorf("invalid sync request")
 	}
 	//non-blocking connect to client over set transport
 	if err := c.transport.connect(w, r); err != nil {
 		return err
 	}
 	//initial ping
-	if err := c.send(&update{Ping: true}); err != nil {
-		return fmt.Errorf("Failed to send initial event")
+	if err := c.send(&Update{Ping: true}); err != nil {
+		return fmt.Errorf("failed to send initial event")
 	}
 	//successfully connected
 	c.connected = true
+	c.connectedAt = time.Now()
 	c.waiter.Add(1)
 	//while connected, ping loop (every 25s, browser timesout after 30s)
 	go func() {
 		for {
 			select {
 			case <-time.After(c.state.PingInterval):
-				if err := c.send(&update{Ping: true}); err != nil {
+				if err := c.send(&Update{Ping: true}); err != nil {
 					goto disconnected
 				}
 			case <-c.connectedCh:
@@ -113,16 +115,17 @@ func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 	}()
 	//non-blocking wait on connection
 	go func() {
-		if err := c.transport.wait(); err != nil {
-			//log error?
-		}
+		//log error?
+		c.transport.wait()
 		close(c.connectedCh)
 	}()
 	//now connected, consumer can connection.Wait()
 	return nil
 }
 
-func (c *conn) push() {
+// Push will the current state only to this client.
+// Blocks until push is complete.
+func (c *conn) Push() {
 	//attempt to mark state as 'pushing'
 	if !atomic.CompareAndSwapUint32(&c.pushing, 0, 1) {
 		//if already pushing, mark queued
@@ -134,25 +137,25 @@ func (c *conn) push() {
 		atomic.StoreUint32(&c.pushing, 0)
 		//queued? dequeue and push again
 		if atomic.CompareAndSwapUint32(&c.queued, 1, 0) {
-			c.push() //within same goroutine
+			c.Push() //within same goroutine
 		}
 	}()
 	//current state data
 	d := &c.state.data
 	d.mut.RLock()
-	if c.version == d.version {
+	if c.Version() == d.version {
 		d.mut.RUnlock()
 		//already have this version
 		return
 	}
-	update := &update{Version: d.version}
+	update := &Update{Version: d.version}
 	//first push? include id
 	if atomic.CompareAndSwapUint32(&c.first, 0, 1) {
 		update.ID = d.id
 	}
 	//choose optimal update (send the smallest)
 	if d.delta != nil &&
-		c.version == (d.version-1) &&
+		c.Version() == (d.version-1) &&
 		len(d.bytes) > 0 &&
 		len(d.delta) < len(d.bytes) {
 		update.Delta = true
@@ -167,16 +170,17 @@ func (c *conn) push() {
 		c.Close()
 		return
 	}
-	//on success, relock and update client version
-	d.mut.RLock()
-	c.version = d.version
-	d.mut.RUnlock()
 }
 
-//send to connection, ensure only 1 concurrent sender
-func (c *conn) send(upd *update) error {
-	c.sendingMut.Lock()
-	defer c.sendingMut.Unlock()
+// send to connection, ensure only 1 concurrent sender
+func (c *conn) send(upd *Update) error {
+	c.sendVerMut.Lock()
+	defer c.sendVerMut.Unlock()
 	//send (transports responsiblity to enforce timeouts)
-	return c.transport.send(upd)
+	if err := c.transport.send(upd); err != nil {
+		return err
+	}
+	// mark new current version
+	c.version = upd.Version
+	return nil
 }

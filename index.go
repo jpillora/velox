@@ -1,12 +1,13 @@
 package velox
 
 import (
-	velox "github.com/jpillora/velox/go"
+	veloxgo "github.com/jpillora/velox/go"
 )
 
-type State = velox.State
-type Conn = velox.Conn
-type Pusher = velox.Pusher
-var JS = velox.JS
-var Sync = velox.Sync
-var SyncHandler = velox.SyncHandler
+type State = veloxgo.State
+type Conn = veloxgo.Conn
+type Pusher = veloxgo.Pusher
+
+var JS = veloxgo.JS
+var Sync = veloxgo.Sync
+var SyncHandler = veloxgo.SyncHandler
