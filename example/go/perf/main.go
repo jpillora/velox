@@ -33,7 +33,7 @@ func main() {
 	const testFile = "/tmp/text.txt"
 	if _, err := os.Stat(testFile); err != nil {
 		log.Printf("downloading %s", testFile)
-		resp, err := http.Get("https://dlg.usg.edu/record/dlg_zlgb_gb0176/fulltext.text")
+		resp, err := http.Get("https://classics.mit.edu/Homer/odyssey.mb.txt")
 		if err != nil {
 			log.Fatal(err)
 		}

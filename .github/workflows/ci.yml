@@ -26,4 +26,4 @@ jobs:
           go-version: ${{ matrix.go-version }}
           check-latest: true
       - name: Test
-        run: go test -v ./...
+        run: .github/workflows/test.sh

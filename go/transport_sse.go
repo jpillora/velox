@@ -39,20 +39,27 @@ func (es *eventSourceTransport) connect(w http.ResponseWriter, r *http.Request) 
 	return nil
 }
 
+// http.ResponseWriter.Write is not thread safe, so we need to lock
 func (es *eventSourceTransport) send(upd *Update) error {
+	if !es.IsConnected() {
+		return errors.New("not connected")
+	}
+	es.mut.Lock()
+	defer es.mut.Unlock()
+
 	b, err := json.Marshal(upd)
 	if err != nil {
 		return err
 	}
+	// TODO: improve this to not use a goroutine
+	// instead it should hijack and use a tcp write-timeout
 	sent := make(chan error)
 	go func() {
-		if es.IsConnected() {
-			err := eventsource.WriteEvent(es.w, eventsource.Event{
-				ID:   strconv.FormatInt(upd.Version, 10),
-				Data: b,
-			})
-			sent <- err
-		}
+		err := eventsource.WriteEvent(es.w, eventsource.Event{
+			ID:   strconv.FormatInt(upd.Version, 10),
+			Data: b,
+		})
+		sent <- err
 	}()
 	select {
 	case <-time.After(es.writeTimeout):
@@ -75,12 +82,11 @@ func (es *eventSourceTransport) IsConnected() bool {
 
 func (es *eventSourceTransport) close() error {
 	if es.IsConnected() {
-		//unblocking the wait, causes the http handler to return
-		close(es.connected)
-
 		es.mut.Lock()
 		es.isConnected = false
 		es.mut.Unlock()
+		//unblocking the wait, causes the http handler to return
+		close(es.connected)
 	}
 	return nil
 }

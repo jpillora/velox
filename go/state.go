@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
+	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,18 +36,17 @@ var (
 // State must be embedded into a struct to make it syncable.
 type State struct {
 	//configuration
-	Throttle     time.Duration `json:"-"`
-	WriteTimeout time.Duration `json:"-"`
-	PingInterval time.Duration `json:"-"`
-	Debug        bool          `json:"-"`
+	Data         MarshalFunc   `json:"-"` // Data is called each Push to get the current state of the object.
+	Throttle     time.Duration `json:"-"` // Throttle is the minimum time between pushes.
+	WriteTimeout time.Duration `json:"-"` // WriteTimeout is the maximum time to wait for a write to complete.
+	PingInterval time.Duration `json:"-"` // PingInterval is the time between pings to the client.
+	Debug        bool          `json:"-"` // Debug is used to enable debug logging.
 	//internal state
-	initMut     sync.Mutex
-	initd       bool
-	localMut    sync.Locker
-	localStruct interface{}
-	connMut     sync.Mutex
-	conns       map[int64]*conn
-	data        struct {
+	initMut sync.Mutex
+	initd   bool
+	connMut sync.Mutex
+	conns   map[int64]*conn
+	data    struct {
 		mut     sync.RWMutex
 		id      string //data id != conn id
 		bytes   []byte
@@ -61,7 +60,13 @@ type State struct {
 	}
 }
 
-func (s *State) init(gostruct interface{}) error {
+func (s *State) init() error {
+	s.initMut.Lock()
+	defer s.initMut.Unlock()
+	if s.initd {
+		return nil
+	}
+	s.initd = true
 	if s.Throttle < MinThrottle {
 		s.Throttle = DefaultThrottle
 	}
@@ -71,30 +76,66 @@ func (s *State) init(gostruct interface{}) error {
 	if s.PingInterval == 0 {
 		s.PingInterval = DefaultPingInterval
 	}
+	if s.Data == nil {
+		return fmt.Errorf("no data function provided")
+	}
 	//get initial JSON bytes and confirm gostruct is marshallable
-	if l, ok := gostruct.(sync.Locker); ok {
-		s.localMut = l
-		s.localMut.Lock()
-		defer s.localMut.Unlock()
-	}
-	b, err := json.Marshal(gostruct)
-	if err != nil {
-		return fmt.Errorf("JSON marshalling failed: %s", err)
-	}
+	b, _ := s.Data()
+	// set data fields
 	s.data.mut.Lock()
 	s.data.bytes = b
 	id := make([]byte, 4)
 	if n, _ := rand.Read(id); n > 0 {
 		s.data.id = hex.EncodeToString(id)
 	}
-	s.localStruct = gostruct
 	s.data.version = 1
 	s.data.mut.Unlock()
+	// set connection fields
 	s.connMut.Lock()
 	s.conns = map[int64]*conn{}
 	s.connMut.Unlock()
-	s.initd = true
 	return nil
+}
+
+func (s *State) self() *State {
+	return s
+}
+
+func (s *State) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	conn, err := s.Handle(w, r)
+	if err != nil {
+		log.Printf("velox: serve: %s", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	conn.Wait()
+}
+
+func (state *State) Handle(w http.ResponseWriter, r *http.Request) (Conn, error) {
+	if err := state.init(); err != nil {
+		return nil, fmt.Errorf("init: %w", err)
+	}
+	version := int64(0)
+	//matching id, allow user to pick version
+	if id := r.URL.Query().Get("id"); id != "" && id == state.data.id {
+		if v, err := strconv.ParseInt(r.URL.Query().Get("v"), 10, 64); err == nil && v > 0 {
+			version = v
+		}
+	}
+	//set initial connection state
+	conn := newConn(atomic.AddInt64(&connectionID, 1), r.RemoteAddr, state, version)
+	//attempt connection over transport
+	//(negotiate websockets / start eventsource emitter)
+	//return when connected
+	if err := conn.connect(w, r); err != nil {
+		return nil, fmt.Errorf("velox connection failed: %s", err)
+	}
+	//hand over to state to keep in sync
+	state.subscribe(conn)
+	//do an initial push only to this client
+	conn.Push()
+	//pass connection to user
+	return conn, nil
 }
 
 // ID uniquely identifies this state object
@@ -106,19 +147,6 @@ func (s *State) ID() string {
 // and a Push is performed, this version number is incremented).
 func (s *State) Version() int64 {
 	return s.data.version
-}
-
-func (s *State) sync(gostruct interface{}) (*State, error) {
-	s.initMut.Lock()
-	defer s.initMut.Unlock()
-	if !s.initd {
-		if err := s.init(gostruct); err != nil {
-			return nil, err
-		}
-	} else if s.localStruct != gostruct {
-		return nil, errors.New("a different struct is already synced")
-	}
-	return s, nil
 }
 
 func (s *State) subscribe(conn *conn) {
@@ -149,6 +177,9 @@ func (s *State) NumConnections() int {
 // Push is thread-safe and is throttled so it can be called
 // with abandon. Returns false if a Push is already in progress.
 func (s *State) Push() bool {
+	if s.Data == nil {
+		return false
+	}
 	//attempt to mark state as 'pushing'
 	if atomic.CompareAndSwapUint32(&s.push.ing, 0, 1) {
 		go s.gopush()
@@ -179,13 +210,7 @@ func (s *State) gopush() {
 		}
 	}()
 	//calculate new json state
-	if s.localMut != nil {
-		s.localMut.Lock()
-	}
-	newBytes, err := json.Marshal(s.localStruct)
-	if s.localMut != nil {
-		s.localMut.Unlock()
-	}
+	newBytes, err := s.Data()
 	if err != nil {
 		log.Printf("velox: marshal failed: %s", err)
 		return

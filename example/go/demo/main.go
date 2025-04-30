@@ -90,7 +90,7 @@ func main() {
 			//change foo
 			root.Lock()
 			root.Users.NumConnections = root.State.NumConnections() //show number of connections 'foo' is currently handling
-			root.Data[string(rune('A'+rand.Intn(26)))] = rand.Intn(26)
+			root.Random.Data[string(rune('A'+rand.Intn(26)))] = rand.Intn(26)
 			root.Unlock()
 			root.Push()
 			//do other stuff...

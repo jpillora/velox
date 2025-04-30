@@ -2,6 +2,7 @@ package velox
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"sync"
@@ -167,6 +168,7 @@ func (c *conn) Push() {
 	d.mut.RUnlock()
 	//unlock data and send!
 	if err := c.send(update); err != nil {
+		log.Printf("velox: send failed: %s", err)
 		c.Close()
 		return
 	}
