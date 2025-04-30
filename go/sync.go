@@ -68,12 +68,13 @@ func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, e
 }
 
 func Marshal(gostruct interface{}) MarshalFunc {
+	l, ok := gostruct.(sync.Locker)
+	if !ok {
+		l = &sync.Mutex{}
+	}
 	return func() (json.RawMessage, error) {
-		l, ok := gostruct.(sync.Locker)
-		if ok {
-			l.Lock()
-			defer l.Unlock()
-		}
+		l.Lock()
+		defer l.Unlock()
 		b, err := json.Marshal(gostruct)
 		if err != nil {
 			return nil, fmt.Errorf("velox sync failed: %s", err)
