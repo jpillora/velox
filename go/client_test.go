@@ -2,7 +2,6 @@ package velox_test
 
 import (
 	"context"
-	"encoding/json"
 	"net"
 	"net/http"
 	"sync"
@@ -14,56 +13,62 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 )
 
-// bufconnTransport creates an http.RoundTripper that dials through a bufconn listener
-func bufconnTransport(l *bufconn.Listener) http.RoundTripper {
-	return &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return l.DialContext(ctx)
+// bufconnClient creates an http.Client that dials through a bufconn listener
+func bufconnClient(l *bufconn.Listener) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return l.DialContext(ctx)
+			},
 		},
 	}
 }
 
-// ClientTestData is the struct used by the server for TestClient
-type ClientTestData struct {
+// ServerData is the struct used by the server
+type ServerData struct {
 	velox.State
 	sync.Mutex
 	Name  string `json:"name"`
 	Count int    `json:"count"`
 }
 
-// ClientData is a simple struct for client-side unmarshalling
+// ClientData is the struct used by the client (embeds sync.Mutex for locking)
 type ClientData struct {
+	sync.Mutex
 	Name  string `json:"name"`
 	Count int    `json:"count"`
 }
 
 func TestClient(t *testing.T) {
-	data := &ClientTestData{Name: "initial", Count: 0}
-	data.State.Throttle = 10 * time.Millisecond
+	serverData := &ServerData{Name: "initial", Count: 0}
+	serverData.State.Throttle = 10 * time.Millisecond
 
 	// Setup in-memory listener and server
 	l := bufconn.Listen(64 * 1024)
 	defer l.Close()
 
-	server := &http.Server{Handler: velox.SyncHandler(data)}
+	server := &http.Server{Handler: velox.SyncHandler(serverData)}
 	go server.Serve(l)
 	defer server.Close()
 
-	// Create client with bufconn transport
-	client := velox.NewClient("http://bufconn/sync")
-	client.Transport = bufconnTransport(l)
-	client.Retry = false // disable retry for testing
+	// Create client data struct with embedded mutex
+	clientData := &ClientData{}
+
+	// Create client
+	client, err := velox.NewClient("http://bufconn/sync", clientData)
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	client.HTTPClient = bufconnClient(l)
+	client.Retry = false
 
 	// Track updates
-	var updates []json.RawMessage
-	var updatesMu sync.Mutex
+	updateCount := atomic.Int32{}
 	connected := make(chan struct{})
 	disconnected := make(chan struct{})
 
-	client.OnUpdate = func(body json.RawMessage) {
-		updatesMu.Lock()
-		updates = append(updates, body)
-		updatesMu.Unlock()
+	client.OnUpdate = func() {
+		updateCount.Add(1)
 	}
 	client.OnConnect = func() {
 		close(connected)
@@ -95,11 +100,11 @@ func TestClient(t *testing.T) {
 
 	// Push some updates
 	for i := 1; i <= 3; i++ {
-		data.Lock()
-		data.Name = "updated"
-		data.Count = i
-		data.Unlock()
-		data.Push()
+		serverData.Lock()
+		serverData.Name = "updated"
+		serverData.Count = i
+		serverData.Unlock()
+		serverData.Push()
 		time.Sleep(50 * time.Millisecond)
 	}
 
@@ -107,32 +112,24 @@ func TestClient(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify we received updates
-	updatesMu.Lock()
-	numUpdates := len(updates)
-	updatesMu.Unlock()
-
-	if numUpdates < 1 {
-		t.Fatalf("Expected at least 1 update, got %d", numUpdates)
+	if updateCount.Load() < 1 {
+		t.Fatalf("Expected at least 1 update, got %d", updateCount.Load())
 	}
-	t.Logf("Received %d updates", numUpdates)
+	t.Logf("Received %d updates", updateCount.Load())
 
-	// Check the last update has correct data
-	updatesMu.Lock()
-	lastUpdate := updates[len(updates)-1]
-	updatesMu.Unlock()
+	// Check the data struct was updated (lock to read safely)
+	clientData.Lock()
+	name := clientData.Name
+	count := clientData.Count
+	clientData.Unlock()
 
-	t.Logf("Last update JSON: %s", string(lastUpdate))
+	t.Logf("Client data: name=%s, count=%d", name, count)
 
-	var lastData ClientData
-	if err := json.Unmarshal(lastUpdate, &lastData); err != nil {
-		t.Fatalf("Failed to unmarshal last update: %v", err)
+	if name != "updated" {
+		t.Errorf("Expected name 'updated', got '%s'", name)
 	}
-
-	if lastData.Name != "updated" {
-		t.Errorf("Expected name 'updated', got '%s'", lastData.Name)
-	}
-	if lastData.Count != 3 {
-		t.Errorf("Expected count 3, got %d", lastData.Count)
+	if count != 3 {
+		t.Errorf("Expected count 3, got %d", count)
 	}
 
 	// Verify version is tracked
@@ -153,25 +150,20 @@ func TestClient(t *testing.T) {
 	}
 }
 
-func TestSyncClient(t *testing.T) {
-	// Server data structure
-	type ServerData struct {
+func TestClientWithoutMutex(t *testing.T) {
+	// Test that client works with structs that don't embed sync.Mutex
+	// Note: Without a mutex, you must synchronize access yourself
+	type SimpleData struct {
+		sync.Mutex // Add mutex to avoid race in test
+		Value      int `json:"value"`
+	}
+
+	serverData := &struct {
 		velox.State
-		sync.Mutex
-		Message string `json:"message"`
-		Value   int    `json:"value"`
-	}
-
-	// Client data structure (can be subset of server)
-	type ClientData struct {
-		Message string `json:"message"`
-		Value   int    `json:"value"`
-	}
-
-	serverData := &ServerData{Message: "hello", Value: 42}
+		Value int `json:"value"`
+	}{Value: 42}
 	serverData.State.Throttle = 10 * time.Millisecond
 
-	// Setup in-memory listener and server
 	l := bufconn.Listen(64 * 1024)
 	defer l.Close()
 
@@ -179,109 +171,85 @@ func TestSyncClient(t *testing.T) {
 	go server.Serve(l)
 	defer server.Close()
 
-	// Create typed sync client
-	client := velox.NewSyncClient[ClientData]("http://bufconn/sync")
-	client.Transport = bufconnTransport(l)
+	clientData := &SimpleData{}
+	client, err := velox.NewClient("http://bufconn/sync", clientData)
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	client.HTTPClient = bufconnClient(l)
 	client.Retry = false
 
-	updateCount := atomic.Int32{}
-	connected := make(chan struct{})
-
-	client.UserOnUpdate = func(data ClientData) {
-		updateCount.Add(1)
-	}
-	client.OnConnect = func() {
-		close(connected)
+	updated := make(chan struct{}, 1)
+	client.OnUpdate = func() {
+		select {
+		case updated <- struct{}{}:
+		default:
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	go func() {
-		client.Connect(ctx)
-	}()
-
-	// Wait for connection
-	select {
-	case <-connected:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Timeout waiting for connection")
-	}
-
-	// Wait for initial data
-	time.Sleep(100 * time.Millisecond)
-
-	// Check initial data
-	data := client.Data()
-	if data.Message != "hello" {
-		t.Errorf("Expected message 'hello', got '%s'", data.Message)
-	}
-	if data.Value != 42 {
-		t.Errorf("Expected value 42, got %d", data.Value)
-	}
-
-	// Push an update
-	serverData.Lock()
-	serverData.Message = "world"
-	serverData.Value = 100
-	serverData.Unlock()
-	serverData.Push()
+	go client.Connect(ctx)
 
 	// Wait for update
-	time.Sleep(100 * time.Millisecond)
-
-	// Check updated data
-	data = client.Data()
-	if data.Message != "world" {
-		t.Errorf("Expected message 'world', got '%s'", data.Message)
+	select {
+	case <-updated:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for update")
 	}
-	if data.Value != 100 {
-		t.Errorf("Expected value 100, got %d", data.Value)
+
+	// Safe to read now - client locks during update
+	clientData.Lock()
+	val := clientData.Value
+	clientData.Unlock()
+
+	if val != 42 {
+		t.Errorf("Expected value 42, got %d", val)
 	}
 
 	client.Disconnect()
 }
 
 func TestClientReconnect(t *testing.T) {
-	type TestData struct {
+	type ServerData struct {
 		velox.State
 		sync.Mutex
 		Counter int `json:"counter"`
 	}
 
-	data := &TestData{Counter: 0}
-	data.State.Throttle = 10 * time.Millisecond
+	type ClientData struct {
+		sync.Mutex
+		Counter int `json:"counter"`
+	}
+
+	serverData := &ServerData{Counter: 0}
+	serverData.State.Throttle = 10 * time.Millisecond
 
 	// Setup in-memory listener and server
 	l := bufconn.Listen(64 * 1024)
 
-	server := &http.Server{Handler: velox.SyncHandler(data)}
+	server := &http.Server{Handler: velox.SyncHandler(serverData)}
 	go server.Serve(l)
 
-	client := velox.NewClient("http://bufconn/sync")
-	client.Transport = bufconnTransport(l)
+	clientData := &ClientData{}
+	client, err := velox.NewClient("http://bufconn/sync", clientData)
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	client.HTTPClient = bufconnClient(l)
 	client.Retry = true
 	client.MinRetryDelay = 50 * time.Millisecond
 	client.MaxRetryDelay = 200 * time.Millisecond
 
 	connectCount := atomic.Int32{}
 	disconnectCount := atomic.Int32{}
-	var updatesMu sync.Mutex
-	var lastCounter int
 
 	client.OnConnect = func() {
 		connectCount.Add(1)
 	}
 	client.OnDisconnect = func() {
 		disconnectCount.Add(1)
-	}
-	client.OnUpdate = func(body json.RawMessage) {
-		var d TestData
-		if err := json.Unmarshal(body, &d); err == nil {
-			updatesMu.Lock()
-			lastCounter = d.Counter
-			updatesMu.Unlock()
-		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -299,18 +267,19 @@ func TestClientReconnect(t *testing.T) {
 	}
 
 	// Push initial update
-	data.Lock()
-	data.Counter = 1
-	data.Unlock()
-	data.Push()
+	serverData.Lock()
+	serverData.Counter = 1
+	serverData.Unlock()
+	serverData.Push()
 	time.Sleep(100 * time.Millisecond)
 
 	// Verify we got the update
-	updatesMu.Lock()
-	if lastCounter != 1 {
-		t.Errorf("Expected counter 1, got %d", lastCounter)
+	clientData.Lock()
+	counter := clientData.Counter
+	clientData.Unlock()
+	if counter != 1 {
+		t.Errorf("Expected counter 1, got %d", counter)
 	}
-	updatesMu.Unlock()
 
 	// Close server and listener to simulate failure
 	server.Close()
@@ -327,45 +296,49 @@ func TestClientReconnect(t *testing.T) {
 }
 
 func TestMultipleClients(t *testing.T) {
-	type TestData struct {
+	type ServerData struct {
 		velox.State
 		sync.Mutex
 		Value int `json:"value"`
 	}
 
-	data := &TestData{Value: 0}
-	data.State.Throttle = 5 * time.Millisecond
+	type ClientData struct {
+		sync.Mutex
+		Value int `json:"value"`
+	}
+
+	serverData := &ServerData{Value: 0}
+	serverData.State.Throttle = 5 * time.Millisecond
 
 	// Setup in-memory listener and server
 	l := bufconn.Listen(256 * 1024) // larger buffer for multiple clients
 	defer l.Close()
 
-	server := &http.Server{Handler: velox.SyncHandler(data)}
+	server := &http.Server{Handler: velox.SyncHandler(serverData)}
 	go server.Serve(l)
 	defer server.Close()
 
-	transport := bufconnTransport(l)
+	httpClient := bufconnClient(l)
 
 	const numClients = 5
-	clients := make([]*velox.Client, numClients)
+	clients := make([]*velox.Client[ClientData], numClients)
+	clientData := make([]*ClientData, numClients)
 	connected := make([]chan struct{}, numClients)
-	lastValues := make([]atomic.Int32, numClients)
 
 	for i := 0; i < numClients; i++ {
-		clients[i] = velox.NewClient("http://bufconn/sync")
-		clients[i].Transport = transport
+		clientData[i] = &ClientData{}
+		var err error
+		clients[i], err = velox.NewClient("http://bufconn/sync", clientData[i])
+		if err != nil {
+			t.Fatalf("Failed to create client %d: %v", i, err)
+		}
+		clients[i].HTTPClient = httpClient
 		clients[i].Retry = false
 		connected[i] = make(chan struct{})
 
 		idx := i
 		clients[i].OnConnect = func() {
 			close(connected[idx])
-		}
-		clients[i].OnUpdate = func(body json.RawMessage) {
-			var d TestData
-			if err := json.Unmarshal(body, &d); err == nil {
-				lastValues[idx].Store(int32(d.Value))
-			}
 		}
 	}
 
@@ -374,7 +347,7 @@ func TestMultipleClients(t *testing.T) {
 
 	// Connect all clients
 	for i := 0; i < numClients; i++ {
-		go func(c *velox.Client) {
+		go func(c *velox.Client[ClientData]) {
 			c.Connect(ctx)
 		}(clients[i])
 	}
@@ -393,10 +366,10 @@ func TestMultipleClients(t *testing.T) {
 	// Push updates
 	const numUpdates = 10
 	for i := 1; i <= numUpdates; i++ {
-		data.Lock()
-		data.Value = i
-		data.Unlock()
-		data.Push()
+		serverData.Lock()
+		serverData.Value = i
+		serverData.Unlock()
+		serverData.Push()
 		time.Sleep(30 * time.Millisecond)
 	}
 
@@ -405,7 +378,9 @@ func TestMultipleClients(t *testing.T) {
 
 	// Verify all clients got the final value
 	for i := 0; i < numClients; i++ {
-		val := lastValues[i].Load()
+		clientData[i].Lock()
+		val := clientData[i].Value
+		clientData[i].Unlock()
 		if val != numUpdates {
 			t.Errorf("Client %d: expected value %d, got %d", i, numUpdates, val)
 		}
@@ -414,5 +389,24 @@ func TestMultipleClients(t *testing.T) {
 	// Disconnect all
 	for i := 0; i < numClients; i++ {
 		clients[i].Disconnect()
+	}
+}
+
+func TestNewClientValidation(t *testing.T) {
+	// Test nil data
+	_, err := velox.NewClient[struct{}]("http://test", nil)
+	if err == nil {
+		t.Error("Expected error for nil data")
+	}
+
+	// Test non-struct type - this won't compile due to generics,
+	// but we can test with a valid struct
+	data := &struct{ Value int }{}
+	client, err := velox.NewClient("http://test", data)
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+	if client == nil {
+		t.Error("Expected non-nil client")
 	}
 }

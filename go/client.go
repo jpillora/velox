@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"sync"
 	"time"
@@ -15,17 +16,15 @@ import (
 	"github.com/jpillora/eventsource"
 )
 
-// Client connects to a Velox server and keeps a local object in sync.
-type Client struct {
+// Client connects to a Velox server and keeps a local struct in sync.
+type Client[T any] struct {
 	// URL is the velox sync endpoint URL
 	URL string
-	// Transport is the HTTP transport to use (optional, useful for testing with bufconn)
-	Transport http.RoundTripper
-	// HTTPClient is the HTTP client to use for SSE connections (optional, overrides Transport)
+	// HTTPClient is the HTTP client to use (optional, useful for testing)
 	HTTPClient *http.Client
 
-	// Callbacks - OnUpdate receives the full merged state after each update
-	OnUpdate     func(data json.RawMessage)
+	// Callbacks
+	OnUpdate     func() // Called after data is updated (outside lock)
 	OnConnect    func()
 	OnDisconnect func()
 	OnError      func(err error)
@@ -37,11 +36,13 @@ type Client struct {
 	// MaxRetryDelay is the maximum retry delay (default: 10s)
 	MaxRetryDelay time.Duration
 
-	// state
+	// internal state
 	mu        sync.Mutex
-	id        string          // server-assigned state ID
-	version   int64           // current version
-	state     json.RawMessage // current full state
+	data      *T          // pointer to user's struct
+	locker    sync.Locker // non-nil if data implements sync.Locker
+	state     json.RawMessage
+	id        string // server-assigned state ID
+	version   int64  // current version
 	connected bool
 	body      io.ReadCloser
 	dec       *eventsource.Decoder
@@ -49,54 +50,61 @@ type Client struct {
 	done      chan struct{}
 }
 
-// NewClient creates a new Velox client for the given URL.
-func NewClient(url string) *Client {
-	return &Client{
+// NewClient creates a new Velox client that syncs to the given struct pointer.
+// The data parameter must be a pointer to a struct. If the struct embeds
+// sync.Mutex (or implements sync.Locker), it will be locked during updates.
+func NewClient[T any](url string, data *T) (*Client[T], error) {
+	if data == nil {
+		return nil, fmt.Errorf("data must not be nil")
+	}
+
+	// Verify T is a struct type
+	t := reflect.TypeOf(data).Elem()
+	if t.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("data must be a pointer to a struct, got pointer to %s", t.Kind())
+	}
+
+	c := &Client[T]{
 		URL:           url,
+		data:          data,
 		Retry:         true,
 		MinRetryDelay: 100 * time.Millisecond,
 		MaxRetryDelay: 10 * time.Second,
 	}
+
+	// Check if data implements sync.Locker
+	if l, ok := any(data).(sync.Locker); ok {
+		c.locker = l
+	}
+
+	return c, nil
 }
 
 // ID returns the server-assigned state ID.
-func (c *Client) ID() string {
+func (c *Client[T]) ID() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.id
 }
 
 // Version returns the current version.
-func (c *Client) Version() int64 {
+func (c *Client[T]) Version() int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.version
 }
 
 // Connected returns true if the client is currently connected.
-func (c *Client) Connected() bool {
+func (c *Client[T]) Connected() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.connected
 }
 
-// State returns the current synced state as raw JSON.
-// Returns a defensive copy to prevent callers from mutating internal state.
-func (c *Client) State() json.RawMessage {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.state == nil {
-		return nil
-	}
-	copied := make(json.RawMessage, len(c.state))
-	copy(copied, c.state)
-	return copied
-}
-
 // Connect starts the client connection. It blocks until the context is
 // cancelled or an unrecoverable error occurs. If Retry is true (default),
 // it will automatically reconnect on connection failures.
-func (c *Client) Connect(ctx context.Context) error {
+func (c *Client[T]) Connect(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	c.mu.Lock()
 	c.cancel = cancel
@@ -153,7 +161,7 @@ func (c *Client) Connect(ctx context.Context) error {
 }
 
 // Disconnect stops the client connection.
-func (c *Client) Disconnect() {
+func (c *Client[T]) Disconnect() {
 	c.mu.Lock()
 	cancel := c.cancel
 	done := c.done
@@ -168,7 +176,7 @@ func (c *Client) Disconnect() {
 }
 
 // connectOnce attempts a single connection to the server.
-func (c *Client) connectOnce(ctx context.Context) error {
+func (c *Client[T]) connectOnce(ctx context.Context) error {
 	// Build URL with query params
 	u, err := url.Parse(c.URL)
 	if err != nil {
@@ -196,11 +204,7 @@ func (c *Client) connectOnce(ctx context.Context) error {
 	// Make request
 	httpClient := c.HTTPClient
 	if httpClient == nil {
-		if c.Transport != nil {
-			httpClient = &http.Client{Transport: c.Transport}
-		} else {
-			httpClient = http.DefaultClient
-		}
+		httpClient = http.DefaultClient
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -250,7 +254,7 @@ func (c *Client) connectOnce(ctx context.Context) error {
 }
 
 // readEvents reads and processes events from the SSE stream.
-func (c *Client) readEvents(ctx context.Context) error {
+func (c *Client[T]) readEvents(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -291,7 +295,7 @@ func (c *Client) readEvents(ctx context.Context) error {
 			continue
 		}
 
-		// Update state ID if provided
+		// Update metadata
 		c.mu.Lock()
 		if update.ID != "" {
 			c.id = update.ID
@@ -300,7 +304,8 @@ func (c *Client) readEvents(ctx context.Context) error {
 			c.version = update.Version
 		}
 
-		// Apply update to state
+		// Apply update to internal state tracker
+		var newState json.RawMessage
 		if len(update.Body) == 0 {
 			// Treat empty body as explicit state clear
 			c.state = nil
@@ -315,67 +320,36 @@ func (c *Client) readEvents(ctx context.Context) error {
 				continue
 			}
 			c.state = merged
+			newState = merged
 		} else {
 			// Full state replacement
 			c.state = update.Body
-		}
-
-		// Copy state for callback to prevent mutation of internal state
-		var stateCopy json.RawMessage
-		if c.state != nil {
-			stateCopy = make(json.RawMessage, len(c.state))
-			copy(stateCopy, c.state)
+			newState = update.Body
 		}
 		c.mu.Unlock()
 
-		// Notify update with copied state
-		if c.OnUpdate != nil && len(stateCopy) > 0 {
-			c.OnUpdate(stateCopy)
+		// Apply to user's data struct (with locking if supported)
+		if len(newState) > 0 {
+			if c.locker != nil {
+				c.locker.Lock()
+			}
+			if err := json.Unmarshal(newState, c.data); err != nil {
+				if c.locker != nil {
+					c.locker.Unlock()
+				}
+				if c.OnError != nil {
+					c.OnError(fmt.Errorf("failed to unmarshal into data: %w", err))
+				}
+				continue
+			}
+			if c.locker != nil {
+				c.locker.Unlock()
+			}
+
+			// Notify update (outside lock)
+			if c.OnUpdate != nil {
+				c.OnUpdate()
+			}
 		}
-	}
-}
-
-// SyncClient is a higher-level client that automatically syncs to a typed struct.
-type SyncClient[T any] struct {
-	*Client
-	// UserOnUpdate is called after internal state is updated (optional)
-	UserOnUpdate func(data T)
-	data         T
-	dataMu       sync.RWMutex
-}
-
-// NewSyncClient creates a new typed sync client.
-func NewSyncClient[T any](url string) *SyncClient[T] {
-	sc := &SyncClient[T]{
-		Client: NewClient(url),
-	}
-	sc.Client.OnUpdate = sc.handleUpdate
-	return sc
-}
-
-// Data returns a copy of the current synced data.
-func (sc *SyncClient[T]) Data() T {
-	sc.dataMu.RLock()
-	defer sc.dataMu.RUnlock()
-	return sc.data
-}
-
-// handleUpdate processes incoming updates.
-func (sc *SyncClient[T]) handleUpdate(body json.RawMessage) {
-	sc.dataMu.Lock()
-	var newData T
-	if err := json.Unmarshal(body, &newData); err != nil {
-		sc.dataMu.Unlock()
-		if sc.Client.OnError != nil {
-			sc.Client.OnError(fmt.Errorf("failed to unmarshal data: %w", err))
-		}
-		return
-	}
-	sc.data = newData
-	sc.dataMu.Unlock()
-
-	// Call user callback if set
-	if sc.UserOnUpdate != nil {
-		sc.UserOnUpdate(newData)
 	}
 }
