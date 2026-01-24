@@ -81,10 +81,16 @@ func (c *Client) Connected() bool {
 }
 
 // State returns the current synced state as raw JSON.
+// Returns a defensive copy to prevent callers from mutating internal state.
 func (c *Client) State() json.RawMessage {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.state
+	if c.state == nil {
+		return nil
+	}
+	copied := make(json.RawMessage, len(c.state))
+	copy(copied, c.state)
+	return copied
 }
 
 // Connect starts the client connection. It blocks until the context is
@@ -263,7 +269,14 @@ func (c *Client) readEvents(ctx context.Context) error {
 		e := &eventsource.Event{}
 		if err := dec.Decode(e); err != nil {
 			if err == io.EOF {
-				return nil
+				// If context was cancelled, treat as clean shutdown
+				select {
+				case <-ctx.Done():
+					return nil
+				default:
+				}
+				// Otherwise return error so retry loop can reconnect
+				return fmt.Errorf("event stream closed unexpectedly: %w", err)
 			}
 			return fmt.Errorf("failed to decode event: %w", err)
 		}
@@ -288,29 +301,36 @@ func (c *Client) readEvents(ctx context.Context) error {
 		}
 
 		// Apply update to state
-		if len(update.Body) > 0 {
-			if update.Delta && len(c.state) > 0 {
-				// Apply delta patch using JSON merge patch
-				merged, err := jsonpatch.MergePatch(c.state, update.Body)
-				if err != nil {
-					c.mu.Unlock()
-					if c.OnError != nil {
-						c.OnError(fmt.Errorf("failed to apply patch: %w", err))
-					}
-					continue
+		if len(update.Body) == 0 {
+			// Treat empty body as explicit state clear
+			c.state = nil
+		} else if update.Delta && len(c.state) > 0 {
+			// Apply delta patch using JSON merge patch
+			merged, err := jsonpatch.MergePatch(c.state, update.Body)
+			if err != nil {
+				c.mu.Unlock()
+				if c.OnError != nil {
+					c.OnError(fmt.Errorf("failed to apply patch: %w", err))
 				}
-				c.state = merged
-			} else {
-				// Full state replacement
-				c.state = update.Body
+				continue
 			}
+			c.state = merged
+		} else {
+			// Full state replacement
+			c.state = update.Body
 		}
-		currentState := c.state
+
+		// Copy state for callback to prevent mutation of internal state
+		var stateCopy json.RawMessage
+		if c.state != nil {
+			stateCopy = make(json.RawMessage, len(c.state))
+			copy(stateCopy, c.state)
+		}
 		c.mu.Unlock()
 
-		// Notify update with full merged state
-		if c.OnUpdate != nil && len(currentState) > 0 {
-			c.OnUpdate(currentState)
+		// Notify update with copied state
+		if c.OnUpdate != nil && len(stateCopy) > 0 {
+			c.OnUpdate(stateCopy)
 		}
 	}
 }
