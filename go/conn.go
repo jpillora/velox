@@ -127,9 +127,15 @@ func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 // Push will the current state only to this client.
 // Blocks until push is complete.
 func (c *conn) Push() {
+	if c.state.Debug {
+		log.Printf("velox: conn[%d] Push() called, connVersion=%d", c.id, c.Version())
+	}
 	//attempt to mark state as 'pushing'
 	if !atomic.CompareAndSwapUint32(&c.pushing, 0, 1) {
 		//if already pushing, mark queued
+		if c.state.Debug {
+			log.Printf("velox: conn[%d] Push() already pushing, marking queued", c.id)
+		}
 		atomic.StoreUint32(&c.queued, 1)
 		return
 	}
@@ -146,7 +152,9 @@ func (c *conn) Push() {
 	d.mut.RLock()
 	if c.Version() == d.version {
 		d.mut.RUnlock()
-		//already have this version
+		if c.state.Debug {
+			log.Printf("velox: conn[%d] already at version %d, skipping", c.id, d.version)
+		}
 		return
 	}
 	update := &Update{Version: d.version}
@@ -167,6 +175,9 @@ func (c *conn) Push() {
 	}
 	d.mut.RUnlock()
 	//unlock data and send!
+	if c.state.Debug {
+		log.Printf("velox: conn[%d] sending version=%d delta=%v bodyLen=%d", c.id, update.Version, update.Delta, len(update.Body))
+	}
 	if err := c.send(update); err != nil {
 		log.Printf("velox: send failed: %s", err)
 		c.Close()

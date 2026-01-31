@@ -182,10 +182,16 @@ func (s *State) Push() bool {
 	}
 	//attempt to mark state as 'pushing'
 	if atomic.CompareAndSwapUint32(&s.push.ing, 0, 1) {
+		if s.Debug {
+			log.Printf("velox: Push() starting new push")
+		}
 		go s.gopush()
 		return true
 	}
 	//if already pushing, mark queued
+	if s.Debug {
+		log.Printf("velox: Push() already pushing, marking queued")
+	}
 	atomic.StoreUint32(&s.push.queued, 1)
 	return false
 }
@@ -215,6 +221,9 @@ func (s *State) gopush() {
 		log.Printf("velox: marshal failed: %s", err)
 		return
 	}
+	if s.Debug {
+		log.Printf("velox: gopush marshaled %d bytes", len(newBytes))
+	}
 	s.data.mut.Lock()
 	changed := false
 	if bytes.Equal(newBytes, []byte("null")) {
@@ -239,6 +248,11 @@ func (s *State) gopush() {
 			s.data.delta = delta
 			s.data.bytes = newBytes
 			changed = true
+			if s.Debug {
+				log.Printf("velox: gopush changed, delta=%s", string(delta))
+			}
+		} else if s.Debug {
+			log.Printf("velox: gopush no change detected")
 		}
 	}
 	// bump if changed

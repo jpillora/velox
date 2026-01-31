@@ -329,10 +329,13 @@ func (c *Client[T]) readEvents(ctx context.Context) error {
 		c.mu.Unlock()
 
 		// Apply to user's data struct (with locking if supported)
+		// Clear all maps in the data struct before unmarshaling to ensure deleted
+		// map entries are properly removed (json.Unmarshal into existing maps doesn't delete keys)
 		if len(newState) > 0 {
 			if c.locker != nil {
 				c.locker.Lock()
 			}
+			clearMaps(c.data)
 			if err := json.Unmarshal(newState, c.data); err != nil {
 				if c.locker != nil {
 					c.locker.Unlock()
@@ -349,6 +352,42 @@ func (c *Client[T]) readEvents(ctx context.Context) error {
 			// Notify update (outside lock)
 			if c.OnUpdate != nil {
 				c.OnUpdate()
+			}
+		}
+	}
+}
+
+// clearMaps recursively clears all maps in a struct using reflection.
+// This is needed because json.Unmarshal only adds/updates map entries,
+// it doesn't remove entries that are absent in the JSON.
+func clearMaps(v any) {
+	clearMapsValue(reflect.ValueOf(v))
+}
+
+func clearMapsValue(v reflect.Value) {
+	if !v.IsValid() {
+		return
+	}
+	switch v.Kind() {
+	case reflect.Ptr, reflect.Interface:
+		if !v.IsNil() {
+			clearMapsValue(v.Elem())
+		}
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			field := v.Field(i)
+			if field.CanSet() {
+				clearMapsValue(field)
+			}
+		}
+	case reflect.Map:
+		if v.CanSet() && !v.IsNil() {
+			v.Set(reflect.MakeMap(v.Type()))
+		}
+	case reflect.Slice:
+		if v.CanSet() && !v.IsNil() {
+			for i := 0; i < v.Len(); i++ {
+				clearMapsValue(v.Index(i))
 			}
 		}
 	}
