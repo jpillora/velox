@@ -154,7 +154,7 @@ func TestClientWithoutMutex(t *testing.T) {
 	// Test that client works with structs that don't embed sync.Mutex
 	// Note: Without a mutex, you must synchronize access yourself
 	type SimpleData struct {
-		sync.Mutex // Add mutex to avoid race in test
+		sync.Mutex     // Add mutex to avoid race in test
 		Value      int `json:"value"`
 	}
 
