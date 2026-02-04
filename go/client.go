@@ -345,6 +345,8 @@ func (c *Client[T]) readEvents(ctx context.Context) error {
 				}
 				continue
 			}
+			// Bind all VMap/VSlice fields (nil pusher on client)
+			BindAll(c.data, c.locker, nil)
 			if c.locker != nil {
 				c.locker.Unlock()
 			}
