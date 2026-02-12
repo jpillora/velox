@@ -43,6 +43,12 @@ func SyncHandler(gostruct interface{}) http.Handler {
 	if tmp, ok := gostruct.(stateEmbedded); ok {
 		s = tmp.self()
 		s.Data = Marshal(gostruct)
+		// auto-bind VMap/VSlice fields to locker and pusher
+		var locker sync.Locker
+		if l, ok := gostruct.(sync.Locker); ok {
+			locker = l
+		}
+		bindAll(gostruct, locker, s)
 		if err := s.init(); err != nil {
 			panic("velox: " + err.Error())
 		}
@@ -68,13 +74,21 @@ func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, e
 }
 
 func Marshal(gostruct interface{}) MarshalFunc {
-	l, ok := gostruct.(sync.Locker)
-	if !ok {
-		l = &sync.Mutex{}
+	// Use RLock if available, else Lock
+	rlock := func() {}
+	runlock := func() {}
+
+	if rl, ok := gostruct.(RLocker); ok {
+		rlock = rl.RLock
+		runlock = rl.RUnlock
+	} else if l, ok := gostruct.(sync.Locker); ok {
+		rlock = l.Lock
+		runlock = l.Unlock
 	}
+
 	return func() (json.RawMessage, error) {
-		l.Lock()
-		defer l.Unlock()
+		rlock()
+		defer runlock()
 		b, err := json.Marshal(gostruct)
 		if err != nil {
 			return nil, fmt.Errorf("velox sync failed: %s", err)

@@ -12,29 +12,28 @@ Real-time JS object synchronisation over SSE and WebSockets in Go and JavaScript
 - Delta updates using [JSONPatch (RFC6902)](https://tools.ietf.org/html/rfc6902)
 - Supports [Server-Sent Events (EventSource)](https://en.wikipedia.org/wiki/Server-sent_events) and [WebSockets](https://en.wikipedia.org/wiki/WebSocket)
 - SSE [client-side poly-fill](https://github.com/remy/polyfills/blob/master/EventSource.js) to fallback to long-polling in older browsers (IE8+).
-- Implement delta queries (return all results, then incrementally return changes)
+- Generic `VMap` and `VSlice` containers with automatic locking and push-on-write
+- Go client (`velox.Client[T]`) for server-to-server sync
 
 ### Quick Usage
 
 Server (Go)
 
 ```go
-//syncable struct
 type Foo struct {
 	velox.State
 	A, B int
 }
 foo := &Foo{}
-//serve velox.js client library (assets/dist/velox.min.js)
 http.Handle("/velox.js", velox.JS)
-//serve velox sync endpoint for foo
 http.Handle("/sync", velox.SyncHandler(foo))
-//make changes
+// make changes and push to all clients
 foo.A = 42
 foo.B = 21
-//push to client
 foo.Push()
 ```
+
+### Node / Browser
 
 Server (Node)
 
@@ -102,32 +101,83 @@ See this [simple `example/`](example/) and view it live here: https://velox.jpil
 
 _Here is a screenshot from this example page, showing the messages arriving as either a full replacement of the object or just a delta. The server will send which ever is smaller._
 
+### VMap and VSlice
+
+`VMap[K, V]` and `VSlice[V]` are generic containers that automatically lock the
+root struct and push changes to clients on every write operation. This removes
+the need to manually call `Lock`/`Unlock`/`Push` when mutating map or slice
+fields.
+
+```go
+type App struct {
+	sync.RWMutex
+	velox.State
+	Settings velox.VMap[string, string] `json:"settings"`
+	Scores   velox.VMap[string, int]    `json:"scores"`
+	Logs     velox.VSlice[string]       `json:"logs"`
+}
+
+app := &App{}
+http.Handle("/sync", velox.SyncHandler(app))
+
+// Each call locks the RWMutex, mutates the data, and pushes (throttled).
+// No manual Lock/Unlock/Push needed.
+app.Settings.Set("theme", "dark")
+app.Scores.Batch(func(data map[string]int) {
+	data["alice"] = 100
+	data["bob"] = 85
+})
+app.Logs.Append("server started")
+```
+
+`SyncHandler` automatically binds all `VMap`/`VSlice` fields to the struct's
+mutex and `State` pusher. On the client side, `velox.Client[T]` rebinds after
+each update.
+
+**How locking works:**
+
+- Write methods (`Set`, `Delete`, `Append`, `Update`, `Batch`, `Clear`) acquire
+  the root struct's `Lock()`, mutate the data, call `State.Push()`, then
+  `Unlock()`.
+- Read methods (`Get`, `Len`, `Keys`, `Values`, `Snapshot`, `Range`) use
+  `RLock()`/`RUnlock()` when the root struct embeds `sync.RWMutex`, allowing
+  concurrent readers. Falls back to `Lock()`/`Unlock()` for `sync.Mutex`.
+- `State.Push()` is throttled (default 200ms) and non-blocking -- it spawns a
+  goroutine that waits for the lock to be released, marshals the struct, computes
+  a delta, and sends it to all connected clients. Rapid mutations are coalesced
+  into fewer pushes.
+- `MarshalJSON`/`UnmarshalJSON` on VMap/VSlice do not lock -- the parent already
+  holds the lock during marshal.
+
+**VMap methods:**
+
+| Write (lock + push) | Read (rlock) |
+|---|---|
+| `Set(key, value)` | `Get(key) (V, bool)` |
+| `Delete(key)` | `Has(key) bool` |
+| `Update(key, func(*V)) bool` | `Len() int` |
+| `Batch(func(map[K]V))` | `Keys() []K` |
+| `Clear()` | `Values() []V` |
+| | `Snapshot() map[K]V` |
+| | `Range(func(K, V) bool)` |
+
+**VSlice methods:**
+
+| Write (lock + push) | Read (rlock) |
+|---|---|
+| `Set([]V)` | `Get() []V` |
+| `Append(values...)` | `At(index) (V, bool)` |
+| `SetAt(index, value) bool` | `Len() int` |
+| `DeleteAt(index) bool` | `Range(func(int, V) bool)` |
+| `Update(index, func(*V)) bool` | |
+| `Batch(func(*[]V))` | |
+| `Clear()` | |
+
 ### Notes
 
+- Object synchronization is one way (server to client) only.
 - JS object properties beginning with `$` will be ignored to play nice with Angular.
 - JS object with an `$apply` function will automatically be called on each update to play nice with Angular.
-- `velox.SyncHandler` is just a small wrapper around `velox.Sync`:
-
-      	```go
-      	func SyncHandler(gostruct interface{}) http.Handler {
-      		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-      			if conn, err := Sync(gostruct, w, r); err == nil {
-      				conn.Wait()
-      			}
-      		})
-      	}
-      	```
-
-### Known issues
-
-- Object synchronization is currently one way (server to client) only.
-- Object diff has not been optimized. It is a simple property-by-property comparison.
-
-### TODO
-
-- WebRTC support
-- Plain [`http`](https://nodejs.org/api/http.html#http_http_createserver_requestlistener) server support in Node
-- WebSockets support in Node
 
 #### MIT License
 
