@@ -86,9 +86,15 @@ func Marshal(gostruct interface{}) MarshalFunc {
 		runlock = l.Unlock
 	}
 
-	return func() (json.RawMessage, error) {
+	return func() (outBytes json.RawMessage, outErr error) {
 		rlock()
 		defer runlock()
+		defer func() {
+			if r := recover(); r != nil {
+				outBytes = nil
+				outErr = fmt.Errorf("velox sync panic during marshal: %v", r)
+			}
+		}()
 		b, err := json.Marshal(gostruct)
 		if err != nil {
 			return nil, fmt.Errorf("velox sync failed: %s", err)

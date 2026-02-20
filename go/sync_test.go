@@ -249,6 +249,66 @@ func (c *testClient) next() (update *velox.Update, eventID string, err error) {
 	return u, e.ID, nil
 }
 
+func TestNilMapMarshal(t *testing.T) {
+	// Reproduces the panic: reflect: call of reflect.Value.Set on zero Value
+	// when a struct with a nil map is pushed.
+	type Inner struct {
+		Tags map[string]string
+	}
+	type TestStruct struct {
+		velox.State
+		sync.Mutex
+		Name  string
+		Inner *Inner
+	}
+	test := &TestStruct{Name: "test", Inner: &Inner{Tags: nil}}
+	server := httptest.NewServer(velox.SyncHandler(test))
+	defer server.Close()
+	client := &testClient{id: 1, url: server.URL}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.connect(ctx); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer client.disconnect()
+	// consume ping
+	if u, _, err := client.next(); err != nil {
+		t.Fatalf("Failed to get ping: %v", err)
+	} else if !u.Ping {
+		t.Fatalf("Expected ping")
+	}
+	// consume initial state
+	if _, _, err := client.next(); err != nil {
+		t.Fatalf("Failed to get initial state: %v", err)
+	}
+	// now set a nil map and push - this previously caused a panic
+	test.Lock()
+	test.Inner = &Inner{Tags: nil}
+	test.Unlock()
+	test.Push()
+	// wait for throttle to pass and push again with valid data
+	time.Sleep(300 * time.Millisecond)
+	test.Lock()
+	test.Name = "updated"
+	test.Unlock()
+	test.Push()
+	// should still be able to receive updates (server didn't crash)
+	u, _, err := client.next()
+	if err != nil {
+		t.Fatalf("Failed to get update after nil map push: %v", err)
+	}
+	if u.Ping {
+		t.Fatalf("Expected data, got ping")
+	}
+	data := &TestStruct{}
+	if err := json.Unmarshal(u.Body, data); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+	if data.Name != "updated" {
+		t.Fatalf("Expected name=updated, got %s", data.Name)
+	}
+}
+
 func newClients(count int, url string) []*testClient {
 	clients := make([]*testClient, count)
 	for i := 0; i < count; i++ {
