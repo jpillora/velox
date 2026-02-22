@@ -79,8 +79,13 @@ func Marshal(gostruct interface{}) MarshalFunc {
 	runlock := func() {}
 	if se, ok := gostruct.(stateEmbedded); ok && se.self().Locker != nil {
 		l := se.self().Locker
-		rlock = l.Lock
-		runlock = l.Unlock
+		if rl, ok2 := l.(RLocker); ok2 {
+			rlock = rl.RLock
+			runlock = rl.RUnlock
+		} else {
+			rlock = l.Lock
+			runlock = l.Unlock
+		}
 	} else if rl, ok := gostruct.(RLocker); ok {
 		rlock = rl.RLock
 		runlock = rl.RUnlock
