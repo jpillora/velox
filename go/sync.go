@@ -43,9 +43,10 @@ func SyncHandler(gostruct interface{}) http.Handler {
 	if tmp, ok := gostruct.(stateEmbedded); ok {
 		s = tmp.self()
 		s.Data = Marshal(gostruct)
-		// auto-bind VMap/VSlice fields to locker and pusher
 		var locker sync.Locker
-		if l, ok := gostruct.(sync.Locker); ok {
+		if s.Locker != nil {
+			locker = s.Locker
+		} else if l, ok := gostruct.(sync.Locker); ok {
 			locker = l
 		}
 		bindAll(gostruct, locker, s)
@@ -74,11 +75,13 @@ func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, e
 }
 
 func Marshal(gostruct interface{}) MarshalFunc {
-	// Use RLock if available, else Lock
 	rlock := func() {}
 	runlock := func() {}
-
-	if rl, ok := gostruct.(RLocker); ok {
+	if se, ok := gostruct.(stateEmbedded); ok && se.self().Locker != nil {
+		l := se.self().Locker
+		rlock = l.Lock
+		runlock = l.Unlock
+	} else if rl, ok := gostruct.(RLocker); ok {
 		rlock = rl.RLock
 		runlock = rl.RUnlock
 	} else if l, ok := gostruct.(sync.Locker); ok {

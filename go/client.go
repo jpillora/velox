@@ -72,8 +72,9 @@ func NewClient[T any](url string, data *T) (*Client[T], error) {
 		MaxRetryDelay: 10 * time.Second,
 	}
 
-	// Check if data implements sync.Locker
-	if l, ok := any(data).(sync.Locker); ok {
+	if se, ok := any(data).(stateEmbedded); ok && se.self().Locker != nil {
+		c.locker = se.self().Locker
+	} else if l, ok := any(data).(sync.Locker); ok {
 		c.locker = l
 	}
 

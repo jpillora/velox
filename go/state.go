@@ -36,6 +36,7 @@ var (
 // State must be embedded into a struct to make it syncable.
 type State struct {
 	//configuration
+	Locker       sync.Locker   `json:"-"` // Locker optionally overrides the lock used during marshal/unmarshal.
 	Data         MarshalFunc   `json:"-"` // Data is called each Push to get the current state of the object.
 	Throttle     time.Duration `json:"-"` // Throttle is the minimum time between pushes.
 	WriteTimeout time.Duration `json:"-"` // WriteTimeout is the maximum time to wait for a write to complete.
