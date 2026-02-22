@@ -1,6 +1,7 @@
 package velox_test
 
 import (
+	"strings"
 	"sync"
 	"testing"
 
@@ -377,6 +378,110 @@ func TestBindAllRebinding(t *testing.T) {
 	if pusher1.count.Load() != 1 {
 		t.Errorf("First pusher count changed to %d", pusher1.count.Load())
 	}
+}
+
+func TestBindAllPanicsOnNestedLocker(t *testing.T) {
+	tests := []struct {
+		name string
+		fn   func()
+	}{
+		{"pointer child with mutex", func() {
+			type Child struct {
+				sync.Mutex
+				Items map[string]string
+			}
+			type Root struct {
+				sync.Mutex
+				Child *Child
+			}
+			velox.BindAll(&Root{Child: &Child{}}, nil, nil)
+		}},
+		{"value child with mutex", func() {
+			type Child struct {
+				sync.Mutex
+				Name string
+			}
+			type Root struct {
+				sync.Mutex
+				Child Child
+			}
+			velox.BindAll(&Root{}, nil, nil)
+		}},
+		{"deep nested mutex", func() {
+			type Project struct {
+				sync.Mutex
+				Data map[string]string
+			}
+			type Machine struct {
+				Projects *Project
+			}
+			type Root struct {
+				sync.Mutex
+				Machine Machine
+			}
+			velox.BindAll(&Root{Machine: Machine{Projects: &Project{}}}, nil, nil)
+		}},
+		{"child with rwmutex", func() {
+			type Child struct {
+				sync.RWMutex
+				Items map[string]string
+			}
+			type Root struct {
+				sync.Mutex
+				Child *Child
+			}
+			velox.BindAll(&Root{Child: &Child{}}, nil, nil)
+		}},
+		{"child via interface field", func() {
+			type Child struct {
+				sync.Mutex
+				Items map[string]string
+			}
+			type Root struct {
+				sync.Mutex
+				Data interface{}
+			}
+			velox.BindAll(&Root{Data: &Child{}}, nil, nil)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatal("expected panic, got none")
+				}
+				msg, ok := r.(string)
+				if !ok {
+					t.Fatalf("expected string panic, got %T: %v", r, r)
+				}
+				if !strings.Contains(msg, "sync.Locker") {
+					t.Fatalf("unexpected panic message: %s", msg)
+				}
+			}()
+			tt.fn()
+		})
+	}
+}
+
+func TestBindAllAllowsRootMutex(t *testing.T) {
+	// Root struct with its own mutex should NOT panic
+	type Root struct {
+		sync.Mutex
+		Items *velox.VMap[string, int]
+	}
+	r := &Root{Items: &velox.VMap[string, int]{}}
+	velox.BindAll(r, nil, nil) // should not panic
+}
+
+func TestBindAllAllowsRootRWMutex(t *testing.T) {
+	// Root struct with RWMutex should NOT panic
+	type Root struct {
+		sync.RWMutex
+		Items *velox.VMap[string, int]
+	}
+	r := &Root{Items: &velox.VMap[string, int]{}}
+	velox.BindAll(r, nil, nil) // should not panic
 }
 
 // TestVMapAndVSliceTogether tests using both types in the same struct
