@@ -1,6 +1,7 @@
 package velox
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -200,6 +201,7 @@ func (c *Client[T]) connectOnce(ctx context.Context) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Accept-Encoding", "gzip")
 
 	// Make request
 	httpClient := c.HTTPClient
@@ -221,9 +223,21 @@ func (c *Client[T]) connectOnce(ctx context.Context) error {
 		return fmt.Errorf("unexpected content-type: %s", ct)
 	}
 
+	// Wrap body with gzip reader if server sent compressed response
+	var bodyReader io.Reader = resp.Body
+	if resp.Header.Get("Content-Encoding") == "gzip" {
+		gzReader, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			resp.Body.Close()
+			return fmt.Errorf("failed to create gzip reader: %w", err)
+		}
+		bodyReader = gzReader
+		resp.Body = &gzipReadCloser{gzReader: gzReader, body: resp.Body}
+	}
+
 	c.mu.Lock()
 	c.body = resp.Body
-	c.dec = eventsource.NewDecoder(resp.Body)
+	c.dec = eventsource.NewDecoder(bodyReader)
 	c.connected = true
 	c.mu.Unlock()
 

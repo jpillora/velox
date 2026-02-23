@@ -2,6 +2,7 @@ package velox
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -20,6 +21,7 @@ type eventSourceTransport struct {
 	mut          sync.Mutex
 	writeTimeout time.Duration
 	w            http.ResponseWriter
+	gzw          *gzipResponseWriter // non-nil if gzip is active
 	isConnected  bool
 	connected    chan struct{}
 }
@@ -39,6 +41,22 @@ func (es *eventSourceTransport) connect(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Vary", "Accept")
 	w.Header().Set("Content-Type", "text/event-stream")
+	//negotiate gzip compression (skip if outer middleware already set it)
+	if acceptsGzip(r) && w.Header().Get("Content-Encoding") == "" {
+		if flusher, ok := w.(http.Flusher); ok {
+			w.Header().Set("Content-Encoding", "gzip")
+			gz := gzipWriterPool.Get().(*gzip.Writer)
+			gz.Reset(w)
+			gzw := &gzipResponseWriter{
+				ResponseWriter: w,
+				gz:             gz,
+				flusher:        flusher,
+			}
+			es.gzw = gzw
+			es.w = gzw
+			return nil
+		}
+	}
 	//connection is now expecting a stream of events
 	es.w = w
 	return nil
@@ -97,6 +115,10 @@ func (es *eventSourceTransport) IsConnected() bool {
 func (es *eventSourceTransport) close() error {
 	if es.IsConnected() {
 		es.mut.Lock()
+		if es.gzw != nil {
+			es.gzw.close()
+			es.gzw = nil
+		}
 		es.isConnected = false
 		es.mut.Unlock()
 		//unblocking the wait, causes the http handler to return

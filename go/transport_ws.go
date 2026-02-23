@@ -1,6 +1,7 @@
 package velox
 
 import (
+	"compress/gzip"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,8 +11,9 @@ import (
 )
 
 var defaultUpgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+	ReadBufferSize:    1024,
+	WriteBufferSize:   1024,
+	EnableCompression: true,
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
@@ -27,6 +29,8 @@ func (ws *websocketsTransport) connect(w http.ResponseWriter, r *http.Request) e
 	if err != nil {
 		return fmt.Errorf("[velox] cannot upgrade connection: %s", err)
 	}
+	conn.EnableWriteCompression(true)
+	conn.SetCompressionLevel(gzip.BestSpeed)
 	ws.conn = conn
 	return nil
 }

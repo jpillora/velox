@@ -1,14 +1,12 @@
 package main
 
 import (
-	"compress/gzip"
 	"log"
 	"math/rand"
 	"net/http"
 	"sync"
 	"time"
 
-	"github.com/NYTimes/gziphandler"
 	"github.com/jpillora/velox"
 )
 
@@ -40,13 +38,9 @@ func main() {
 			time.Sleep(250 * time.Millisecond)
 		}
 	}()
-	//sync handlers
+	//sync handlers (gzip compression is built-in)
 	http.Handle("/velox.js", velox.JS)
-	//WARNING: minSize=0 is very important!
-	minSize := 0
-	gzipper, _ := gziphandler.NewGzipLevelAndMinSize(
-		gzip.DefaultCompression, minSize)
-	http.Handle("/sync", gzipper(velox.SyncHandler(foo)))
+	http.Handle("/sync", velox.SyncHandler(foo))
 	//index handler
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
