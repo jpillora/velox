@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	jsonpatch "github.com/evanphx/json-patch/v5"
 	"github.com/jpillora/eventsource"
 )
 
@@ -38,11 +37,11 @@ type Client[T any] struct {
 
 	// internal state
 	mu        sync.Mutex
-	data      *T          // pointer to user's struct
-	locker    sync.Locker // non-nil if data implements sync.Locker
-	state     json.RawMessage
-	id        string // server-assigned state ID
-	version   int64  // current version
+	data      *T               // pointer to user's struct
+	locker    sync.Locker      // non-nil if data implements sync.Locker
+	stateMap  map[string]any   // cached unmarshaled state for fast delta merge
+	id        string           // server-assigned state ID
+	version   int64            // current version
 	connected bool
 	body      io.ReadCloser
 	dec       *eventsource.Decoder
@@ -309,22 +308,34 @@ func (c *Client[T]) readEvents(ctx context.Context) error {
 		var newState json.RawMessage
 		if len(update.Body) == 0 {
 			// Treat empty body as explicit state clear
-			c.state = nil
-		} else if update.Delta && len(c.state) > 0 {
-			// Apply delta patch using JSON merge patch
-			merged, err := jsonpatch.MergePatch(c.state, update.Body)
-			if err != nil {
+			c.stateMap = nil
+		} else if update.Delta && c.stateMap != nil {
+			// Apply delta patch in-place using mergeObjects (zero-alloc)
+			var patchMap map[string]any
+			if err := json.Unmarshal(update.Body, &patchMap); err != nil {
 				c.mu.Unlock()
 				if c.OnError != nil {
-					c.OnError(fmt.Errorf("failed to apply patch: %w", err))
+					c.OnError(fmt.Errorf("failed to unmarshal patch: %w", err))
 				}
 				continue
 			}
-			c.state = merged
+			mergeObjects(c.stateMap, patchMap)
+			// Marshal the updated map to bytes for struct unmarshal
+			merged, err := json.Marshal(c.stateMap)
+			if err != nil {
+				c.mu.Unlock()
+				if c.OnError != nil {
+					c.OnError(fmt.Errorf("failed to marshal state: %w", err))
+				}
+				continue
+			}
 			newState = merged
 		} else {
-			// Full state replacement
-			c.state = update.Body
+			// Full state replacement — cache as map for future deltas
+			var m map[string]any
+			if err := json.Unmarshal(update.Body, &m); err == nil {
+				c.stateMap = m
+			}
 			newState = update.Body
 		}
 		c.mu.Unlock()

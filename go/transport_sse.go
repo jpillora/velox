@@ -1,6 +1,7 @@
 package velox
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,6 +11,10 @@ import (
 
 	"github.com/jpillora/eventsource"
 )
+
+var encodePool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
 
 type eventSourceTransport struct {
 	mut          sync.Mutex
@@ -47,9 +52,16 @@ func (es *eventSourceTransport) send(upd *Update) error {
 	es.mut.Lock()
 	defer es.mut.Unlock()
 
-	b, err := json.Marshal(upd)
-	if err != nil {
+	buf := encodePool.Get().(*bytes.Buffer)
+	buf.Reset()
+	if err := json.NewEncoder(buf).Encode(upd); err != nil {
+		encodePool.Put(buf)
 		return err
+	}
+	// json.Encoder.Encode appends a trailing newline; strip it
+	b := buf.Bytes()
+	if len(b) > 0 && b[len(b)-1] == '\n' {
+		b = b[:len(b)-1]
 	}
 	// TODO: improve this to not use a goroutine
 	// instead it should hijack and use a tcp write-timeout
@@ -63,8 +75,10 @@ func (es *eventSourceTransport) send(upd *Update) error {
 	}()
 	select {
 	case <-time.After(es.writeTimeout):
+		// don't return buf to pool; goroutine may still be writing
 		return errors.New("timeout")
 	case err := <-sent:
+		encodePool.Put(buf)
 		return err
 	}
 }

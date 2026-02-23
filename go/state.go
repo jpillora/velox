@@ -11,8 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	jsonpatch "github.com/evanphx/json-patch/v5"
 )
 
 // Pusher implements a push method,
@@ -47,12 +45,13 @@ type State struct {
 	initd   bool
 	connMut sync.Mutex
 	conns   map[int64]*conn
-	data    struct {
+	data struct {
 		mut     sync.RWMutex
 		id      string //data id != conn id
 		bytes   []byte
 		delta   []byte
 		version int64
+		patcher mergePatcher // caches unmarshaled prev state
 	}
 	push struct {
 		mut    sync.Mutex
@@ -85,6 +84,8 @@ func (s *State) init() error {
 	// set data fields
 	s.data.mut.Lock()
 	s.data.bytes = b
+	// seed the merge patcher cache with the initial state
+	s.data.patcher.patch(b)
 	id := make([]byte, 4)
 	if n, _ := rand.Read(id); n > 0 {
 		s.data.id = hex.EncodeToString(id)
@@ -238,7 +239,7 @@ func (s *State) gopush() {
 			s.data.bytes = []byte(`{}`)
 		}
 		// steps to go from local to remote, capture changes
-		delta, err := jsonpatch.CreateMergePatch(s.data.bytes, newBytes)
+		delta, err := s.data.patcher.patch(newBytes)
 		if err != nil {
 			panic(fmt.Errorf("create-patch: %w", err))
 		}
