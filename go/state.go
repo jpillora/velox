@@ -200,6 +200,7 @@ func (s *State) Push() bool {
 
 // non-blocking push
 func (s *State) gopush() {
+	s.init()
 	s.push.mut.Lock()
 	t0 := time.Now()
 	//queue cleanup
