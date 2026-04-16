@@ -392,6 +392,101 @@ func TestMultipleClients(t *testing.T) {
 	}
 }
 
+func TestClientOmitzeroFieldClearing(t *testing.T) {
+	type TmuxState struct {
+		ServerRunning bool     `json:"serverRunning"`
+		Sessions      []string `json:"sessions,omitempty"`
+	}
+
+	type ServerData struct {
+		velox.State
+		sync.Mutex
+		Name string    `json:"name"`
+		Tmux TmuxState `json:"tmux,omitzero"`
+	}
+
+	type ClientData struct {
+		sync.Mutex
+		Name string    `json:"name"`
+		Tmux TmuxState `json:"tmux,omitzero"`
+	}
+
+	serverData := &ServerData{
+		Name: "test",
+		Tmux: TmuxState{ServerRunning: true, Sessions: []string{"dev", "admin"}},
+	}
+	serverData.State.Throttle = 10 * time.Millisecond
+
+	l := bufconn.Listen(64 * 1024)
+	defer l.Close()
+
+	server := &http.Server{Handler: velox.SyncHandler(serverData)}
+	go server.Serve(l)
+	defer server.Close()
+
+	clientData := &ClientData{}
+	client, err := velox.NewClient("http://bufconn/sync", clientData)
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	client.HTTPClient = bufconnClient(l)
+	client.Retry = false
+
+	updateCh := make(chan struct{}, 10)
+	client.OnUpdate = func() {
+		select {
+		case updateCh <- struct{}{}:
+		default:
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go client.Connect(ctx)
+
+	// Wait for initial sync
+	select {
+	case <-updateCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for initial update")
+	}
+
+	// Verify initial state
+	clientData.Lock()
+	if !clientData.Tmux.ServerRunning {
+		t.Fatal("Expected ServerRunning=true initially")
+	}
+	if len(clientData.Tmux.Sessions) != 2 {
+		t.Fatalf("Expected 2 sessions initially, got %d", len(clientData.Tmux.Sessions))
+	}
+	clientData.Unlock()
+
+	// Now clear the tmux state on server (simulate tmux server dying)
+	serverData.Lock()
+	serverData.Tmux = TmuxState{} // zero value — omitzero will omit this from JSON
+	serverData.Unlock()
+	serverData.Push()
+
+	// Wait for delta to arrive
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify the client state was cleared
+	clientData.Lock()
+	running := clientData.Tmux.ServerRunning
+	sessions := clientData.Tmux.Sessions
+	clientData.Unlock()
+
+	if running {
+		t.Error("Expected ServerRunning=false after clearing, got true")
+	}
+	if len(sessions) != 0 {
+		t.Errorf("Expected 0 sessions after clearing, got %d: %v", len(sessions), sessions)
+	}
+
+	client.Disconnect()
+}
+
 func TestNewClientValidation(t *testing.T) {
 	// Test nil data
 	_, err := velox.NewClient[struct{}]("http://test", nil)

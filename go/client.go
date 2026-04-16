@@ -355,13 +355,13 @@ func (c *Client[T]) readEvents(ctx context.Context) error {
 		c.mu.Unlock()
 
 		// Apply to user's data struct (with locking if supported)
-		// Clear all maps in the data struct before unmarshaling to ensure deleted
-		// map entries are properly removed (json.Unmarshal into existing maps doesn't delete keys)
+		// Zero all serializable fields before unmarshaling to ensure fields
+		// removed from the stateMap (via omitzero/omitempty) are properly cleared.
 		if len(newState) > 0 {
 			if c.locker != nil {
 				c.locker.Lock()
 			}
-			clearMaps(c.data)
+			clearForUnmarshal(c.data)
 			if err := json.Unmarshal(newState, c.data); err != nil {
 				if c.locker != nil {
 					c.locker.Unlock()
@@ -385,38 +385,42 @@ func (c *Client[T]) readEvents(ctx context.Context) error {
 	}
 }
 
-// clearMaps recursively clears all maps in a struct using reflection.
-// This is needed because json.Unmarshal only adds/updates map entries,
-// it doesn't remove entries that are absent in the JSON.
-func clearMaps(v any) {
-	clearMapsValue(reflect.ValueOf(v))
+// clearForUnmarshal zeros all JSON-serializable fields in a struct before
+// unmarshaling the complete stateMap. Since the stateMap always represents the
+// full state, json.Unmarshal will re-populate all fields that should have values.
+// Fields tagged with json:"-" are preserved (e.g., sync.Locker, internal state).
+// Anonymous (embedded) structs are recursed into rather than zeroed wholesale,
+// so their json:"-" fields are also preserved.
+func clearForUnmarshal(v any) {
+	clearForUnmarshalValue(reflect.ValueOf(v))
 }
 
-func clearMapsValue(v reflect.Value) {
+func clearForUnmarshalValue(v reflect.Value) {
 	if !v.IsValid() {
 		return
 	}
 	switch v.Kind() {
-	case reflect.Ptr, reflect.Interface:
+	case reflect.Ptr:
 		if !v.IsNil() {
-			clearMapsValue(v.Elem())
+			clearForUnmarshalValue(v.Elem())
 		}
 	case reflect.Struct:
+		t := v.Type()
 		for i := 0; i < v.NumField(); i++ {
 			field := v.Field(i)
-			if field.CanSet() {
-				clearMapsValue(field)
+			ft := t.Field(i)
+			if !field.CanSet() {
+				continue
 			}
-		}
-	case reflect.Map:
-		if v.CanSet() && !v.IsNil() {
-			v.Set(reflect.MakeMap(v.Type()))
-		}
-	case reflect.Slice:
-		if v.CanSet() && !v.IsNil() {
-			for i := 0; i < v.Len(); i++ {
-				clearMapsValue(v.Index(i))
+			tag := ft.Tag.Get("json")
+			if tag == "-" {
+				continue
 			}
+			if ft.Anonymous && field.Kind() == reflect.Struct {
+				clearForUnmarshalValue(field)
+				continue
+			}
+			field.Set(reflect.Zero(ft.Type))
 		}
 	}
 }
