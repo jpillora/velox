@@ -87,7 +87,8 @@ Client API (Node and Browser)
 - `v.onupdate(object)` _function_ - Called when a server push is received
 - `v.onerror(err)` _function_ - Called when a connection error occurs
 - `v.onconnect()` _function_ - Called when the connection is opened
-- `v.ondisconnect()` _function_ - Called when the connection is closed
+- `v.ondisconnect()` _function_ - When the handler declares no parameters (arity 0, the default), it is called once on each disconnect as a transition notification while velox continues to reconnect on its own with exponential backoff.
+- `v.ondisconnect(retry)` _function_ - When the handler declares a `retry` parameter (arity 1), velox suppresses its own backoff retries and instead invokes this handler on every connection close (including while offline), passing a `retry` trigger so the caller controls reconnect timing (e.g. to drive a visible countdown). Call `retry()` to reconnect.
 - `v.onchange(bool)` _function_ - Called when the connection is opened or closed
 - `v.connected` _bool_ - Denotes whether the connection is currently open
 - `v.ws` _bool_ - Denotes whether the connection is in web sockets mode

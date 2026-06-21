@@ -188,7 +188,9 @@ class Velox {
       this.onchange(this.connected);
       if (this.connected) {
         this.onconnect();
-      } else {
+      } else if (this.ondisconnect.length !== 1) {
+        //arity-1 ondisconnect handlers are invoked from connclose with a
+        //retry trigger, so skip the legacy transition-only notification
         this.ondisconnect();
       }
     }
@@ -239,6 +241,15 @@ class Velox {
   connclose() {
     this.statusCheck();
     if (this.opts.retry) {
+      if (this.ondisconnect.length === 1) {
+        //caller opted into manual retries by declaring a retry param.
+        //notify on every close (even while offline) so a countdown UI
+        //stays accurate; the caller's retry() reconnects when ready.
+        if (this.retrying) {
+          this.ondisconnect(this.connect.bind(this));
+        }
+        return;
+      }
       //if enabled, backoff retry connection
       let d = this.backoff.duration();
       if (this.retrying && velox.online) {
