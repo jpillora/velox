@@ -83,7 +83,9 @@ func (es *eventSourceTransport) send(upd *Update) error {
 	}
 	// TODO: improve this to not use a goroutine
 	// instead it should hijack and use a tcp write-timeout
-	sent := make(chan error)
+	// buffered so an abandoned (timed-out) writer goroutine can
+	// deposit its result and exit instead of blocking forever
+	sent := make(chan error, 1)
 	go func() {
 		err := eventsource.WriteEvent(es.w, eventsource.Event{
 			ID:   strconv.FormatInt(upd.Version, 10),
