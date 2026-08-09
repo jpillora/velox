@@ -83,9 +83,9 @@ func TestRefreshChangedStateUpdatesDataAndCache(t *testing.T) {
 	if got := reflect.ValueOf(s.data.patcher.prev).Pointer(); got == reflect.ValueOf(prevCache).Pointer() {
 		t.Fatalf("patcher cache pointer = %x, want a replacement", got)
 	}
-	wantPrev := map[string]interface{}{"keep": float64(1), "value": "after"}
-	if !reflect.DeepEqual(s.data.patcher.prev, wantPrev) {
-		t.Fatalf("patcher cache = %#v, want %#v", s.data.patcher.prev, wantPrev)
+	wantPrev := []byte(`{"keep":1,"value":"after"}`)
+	if !bytes.Equal(s.data.patcher.prev, wantPrev) {
+		t.Fatalf("patcher cache = %s, want %s", s.data.patcher.prev, wantPrev)
 	}
 }
 
@@ -114,9 +114,9 @@ func TestRefreshOwnsMarshalBufferSnapshots(t *testing.T) {
 	if s.data.version != 2 {
 		t.Fatalf("version = %d, want 2", s.data.version)
 	}
-	wantPrev := map[string]interface{}{"value": "B"}
-	if !reflect.DeepEqual(s.data.patcher.prev, wantPrev) {
-		t.Fatalf("patcher cache = %#v, want %#v", s.data.patcher.prev, wantPrev)
+	wantPrev := []byte(`{"value":"B"}`)
+	if !bytes.Equal(s.data.patcher.prev, wantPrev) {
+		t.Fatalf("patcher cache = %s, want %s", s.data.patcher.prev, wantPrev)
 	}
 	if reflect.ValueOf(s.data.bytes).Pointer() == reflect.ValueOf(buffer).Pointer() {
 		t.Fatal("updated cached bytes alias marshal buffer")
@@ -126,8 +126,8 @@ func TestRefreshOwnsMarshalBufferSnapshots(t *testing.T) {
 	if !bytes.Equal(s.data.bytes, []byte(`{"value":"B"}`)) {
 		t.Fatalf("cached bytes changed after marshal buffer mutation: got %s, want value B", s.data.bytes)
 	}
-	if !reflect.DeepEqual(s.data.patcher.prev, wantPrev) {
-		t.Fatalf("patcher cache changed after marshal buffer mutation: got %#v, want %#v", s.data.patcher.prev, wantPrev)
+	if !bytes.Equal(s.data.patcher.prev, wantPrev) {
+		t.Fatalf("patcher cache changed after marshal buffer mutation: got %s, want %s", s.data.patcher.prev, wantPrev)
 	}
 }
 
@@ -214,8 +214,8 @@ func TestRefreshNilBytesStillSeedsAndPatches(t *testing.T) {
 	if s.data.version != 8 {
 		t.Fatalf("version = %d, want 8", s.data.version)
 	}
-	if s.data.patcher.prev == nil || len(s.data.patcher.prev) != 0 {
-		t.Fatalf("patcher cache = %#v, want non-nil empty map", s.data.patcher.prev)
+	if !bytes.Equal(s.data.patcher.prev, []byte(`{}`)) {
+		t.Fatalf("patcher cache = %s, want {}", s.data.patcher.prev)
 	}
 }
 
@@ -243,6 +243,9 @@ func TestRefreshNullStillClearsByteIdenticalState(t *testing.T) {
 	if s.data.version != 8 {
 		t.Fatalf("version = %d, want 8", s.data.version)
 	}
+	if !s.data.cleared {
+		t.Fatal("null state did not set cleared marker")
+	}
 	prevPointer := reflect.ValueOf(prevCache).Pointer()
 	if got := reflect.ValueOf(s.data.patcher.prev).Pointer(); got != prevPointer {
 		t.Fatalf("patcher cache was replaced: got pointer %x, want %x", got, prevPointer)
@@ -260,11 +263,228 @@ func TestRefreshNullStillClearsByteIdenticalState(t *testing.T) {
 	if s.data.version != 9 {
 		t.Fatalf("version after repeated null = %d, want 9", s.data.version)
 	}
+	if !s.data.cleared {
+		t.Fatal("repeated null removed cleared marker")
+	}
 	if got := reflect.ValueOf(s.data.patcher.prev).Pointer(); got != prevPointer {
 		t.Fatalf("repeated null replaced patcher cache: got pointer %x, want %x", got, prevPointer)
 	}
 	if got := patcherSnapshot(t, s.data.patcher.prev); !bytes.Equal(got, prevSnapshot) {
 		t.Fatalf("repeated null changed patcher cache: got %s, want %s", got, prevSnapshot)
+	}
+}
+
+func TestRefreshJSONWhitespaceNullVariants(t *testing.T) {
+	variants := [][]byte{
+		[]byte("null"),
+		[]byte(" null"),
+		[]byte("null "),
+		[]byte("\tnull\r"),
+		[]byte(" \t\r\nnull\n\r\t "),
+	}
+	for _, variant := range variants {
+		t.Run(fmt.Sprintf("%q", variant), func(t *testing.T) {
+			s := directRefreshState(variant)
+			s.data.bytes = []byte(`{"value":"A"}`)
+			s.data.delta = []byte(`{"stale":true}`)
+			s.data.version = 7
+			if _, err := s.data.patcher.patch(s.data.bytes); err != nil {
+				t.Fatal(err)
+			}
+			previousCache := s.data.patcher.prev
+			previousPointer := reflect.ValueOf(previousCache).Pointer()
+
+			changed, err := s.refresh()
+			if err != nil || !changed {
+				t.Fatalf("refresh = %v, %v; want changed", changed, err)
+			}
+			if s.data.bytes != nil || s.data.delta != nil || !s.data.cleared || s.data.version != 8 {
+				t.Fatalf("cleared state: bytes=%s delta=%s cleared=%v version=%d", s.data.bytes, s.data.delta, s.data.cleared, s.data.version)
+			}
+			if got := reflect.ValueOf(s.data.patcher.prev).Pointer(); got != previousPointer {
+				t.Fatalf("null replaced cache pointer: got %x, want %x", got, previousPointer)
+			}
+			if !bytes.Equal(s.data.patcher.prev, previousCache) {
+				t.Fatalf("null changed cache: got %s, want %s", s.data.patcher.prev, previousCache)
+			}
+		})
+	}
+}
+
+func TestRefreshByteIdenticalWhitespaceNullStillClears(t *testing.T) {
+	payload := []byte(" \tnull\r\n")
+	s := directRefreshState(payload)
+	s.data.bytes = bytes.Clone(payload)
+	s.data.delta = []byte(`{"stale":true}`)
+	s.data.version = 7
+	if _, err := s.data.patcher.patch(payload); err != nil {
+		t.Fatal(err)
+	}
+	previousCache := s.data.patcher.prev
+	previousPointer := reflect.ValueOf(previousCache).Pointer()
+
+	changed, err := s.refresh()
+	if err != nil || !changed {
+		t.Fatalf("refresh = %v, %v; want changed", changed, err)
+	}
+	if s.data.bytes != nil || s.data.delta != nil || !s.data.cleared || s.data.version != 8 {
+		t.Fatalf("cleared state: bytes=%s delta=%s cleared=%v version=%d", s.data.bytes, s.data.delta, s.data.cleared, s.data.version)
+	}
+	if got := reflect.ValueOf(s.data.patcher.prev).Pointer(); got != previousPointer {
+		t.Fatalf("null replaced cache pointer: got %x, want %x", got, previousPointer)
+	}
+}
+
+func TestRefreshInvalidNearNullIsTransactional(t *testing.T) {
+	variants := [][]byte{
+		[]byte("nul"),
+		[]byte("nullx"),
+		[]byte(" null x "),
+		[]byte("\vnull"),
+		[]byte("null\v"),
+	}
+	for _, variant := range variants {
+		t.Run(fmt.Sprintf("%q", variant), func(t *testing.T) {
+			s := directRefreshState(variant)
+			s.data.bytes = []byte(`{"value":"A"}`)
+			s.data.delta = []byte(`{"existing":true}`)
+			s.data.version = 7
+			if _, err := s.data.patcher.patch(s.data.bytes); err != nil {
+				t.Fatal(err)
+			}
+			bytesPointer := reflect.ValueOf(s.data.bytes).Pointer()
+			deltaPointer := reflect.ValueOf(s.data.delta).Pointer()
+			previousCache := s.data.patcher.prev
+			previousPointer := reflect.ValueOf(previousCache).Pointer()
+
+			changed, err := s.refresh()
+			if err == nil || changed || !strings.HasPrefix(err.Error(), "create-patch: ") {
+				t.Fatalf("refresh = %v, %v; want unchanged create-patch error", changed, err)
+			}
+			if s.data.cleared || s.data.version != 7 {
+				t.Fatalf("invalid near-null changed marker/version: cleared=%v version=%d", s.data.cleared, s.data.version)
+			}
+			if got := reflect.ValueOf(s.data.bytes).Pointer(); got != bytesPointer {
+				t.Fatalf("invalid near-null replaced bytes: got %x, want %x", got, bytesPointer)
+			}
+			if got := reflect.ValueOf(s.data.delta).Pointer(); got != deltaPointer {
+				t.Fatalf("invalid near-null replaced delta: got %x, want %x", got, deltaPointer)
+			}
+			if got := reflect.ValueOf(s.data.patcher.prev).Pointer(); got != previousPointer {
+				t.Fatalf("invalid near-null replaced cache: got %x, want %x", got, previousPointer)
+			}
+		})
+	}
+}
+
+func TestRefreshRestoresFullSnapshotAfterNull(t *testing.T) {
+	const initial = `{"keep":{"nested":true},"value":"A"}`
+	tests := []struct {
+		name      string
+		clearJSON string
+		target    string
+	}{
+		{name: "same object", clearJSON: " \tnull\r\n", target: initial},
+		{name: "partially changed object", clearJSON: "null", target: `{"keep":{"nested":true},"value":"B"}`},
+		{name: "empty object", clearJSON: "\n null \t", target: `{}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := directRefreshState([]byte(tt.clearJSON))
+			s.data.bytes = []byte(initial)
+			s.data.delta = []byte(`{"stale":true}`)
+			s.data.version = 7
+			if _, err := s.data.patcher.patch(s.data.bytes); err != nil {
+				t.Fatal(err)
+			}
+
+			changed, err := s.refresh()
+			if err != nil || !changed {
+				t.Fatalf("clear refresh = %v, %v; want changed", changed, err)
+			}
+			if s.data.bytes != nil || s.data.delta != nil || !s.data.cleared || s.data.version != 8 {
+				t.Fatalf("cleared state: bytes=%s delta=%s cleared=%v version=%d", s.data.bytes, s.data.delta, s.data.cleared, s.data.version)
+			}
+
+			target := []byte(tt.target)
+			s.Data = func() (json.RawMessage, error) { return target, nil }
+			changed, err = s.refresh()
+			if err != nil || !changed {
+				t.Fatalf("restore refresh = %v, %v; want changed", changed, err)
+			}
+			if !bytes.Equal(s.data.bytes, target) {
+				t.Fatalf("restored bytes = %s, want %s", s.data.bytes, target)
+			}
+			if s.data.delta != nil {
+				t.Fatalf("restored delta = %s, want nil full snapshot", s.data.delta)
+			}
+			if s.data.cleared || s.data.version != 9 {
+				t.Fatalf("restored state: cleared=%v version=%d, want false/9", s.data.cleared, s.data.version)
+			}
+			if !bytes.Equal(s.data.patcher.prev, target) {
+				t.Fatalf("restored patch cache = %s, want %s", s.data.patcher.prev, target)
+			}
+			if reflect.ValueOf(s.data.bytes).Pointer() == reflect.ValueOf(target).Pointer() {
+				t.Fatal("restored full snapshot aliases marshal buffer")
+			}
+		})
+	}
+}
+
+func TestRefreshClearedStateErrorsAreTransactional(t *testing.T) {
+	const initial = `{"keep":true,"value":"A"}`
+	s := directRefreshState([]byte("null"))
+	s.data.bytes = []byte(initial)
+	s.data.version = 7
+	if _, err := s.data.patcher.patch(s.data.bytes); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := s.refresh(); err != nil || !changed {
+		t.Fatalf("clear refresh = %v, %v; want changed", changed, err)
+	}
+	previousCache := s.data.patcher.prev
+	previousPointer := reflect.ValueOf(previousCache).Pointer()
+	previousSnapshot := bytes.Clone(previousCache)
+
+	tests := []struct {
+		name string
+		data MarshalFunc
+	}{
+		{
+			name: "invalid JSON",
+			data: func() (json.RawMessage, error) { return json.RawMessage(`{`), nil },
+		},
+		{
+			name: "data error",
+			data: func() (json.RawMessage, error) { return nil, errors.New("marshal failed") },
+		},
+	}
+	for _, tt := range tests {
+		s.Data = tt.data
+		changed, err := s.refresh()
+		if err == nil || changed {
+			t.Errorf("%s refresh = %v, %v; want unchanged error", tt.name, changed, err)
+		}
+		if s.data.bytes != nil || s.data.delta != nil || !s.data.cleared || s.data.version != 8 {
+			t.Errorf("%s changed cleared state: bytes=%s delta=%s cleared=%v version=%d", tt.name, s.data.bytes, s.data.delta, s.data.cleared, s.data.version)
+		}
+		if got := reflect.ValueOf(s.data.patcher.prev).Pointer(); got != previousPointer {
+			t.Errorf("%s replaced cache pointer: got %x, want %x", tt.name, got, previousPointer)
+		}
+		if !bytes.Equal(s.data.patcher.prev, previousSnapshot) {
+			t.Errorf("%s changed cache: got %s, want %s", tt.name, s.data.patcher.prev, previousSnapshot)
+		}
+	}
+
+	restored := json.RawMessage(`{"keep":true,"value":"B"}`)
+	s.Data = func() (json.RawMessage, error) { return restored, nil }
+	changed, err := s.refresh()
+	if err != nil || !changed {
+		t.Fatalf("recovery refresh = %v, %v; want changed", changed, err)
+	}
+	if !bytes.Equal(s.data.bytes, restored) || s.data.delta != nil || s.data.cleared || s.data.version != 9 {
+		t.Fatalf("recovered state: bytes=%s delta=%s cleared=%v version=%d", s.data.bytes, s.data.delta, s.data.cleared, s.data.version)
 	}
 }
 
@@ -997,11 +1217,7 @@ func directRefreshState(payload []byte) *State {
 	return s
 }
 
-func patcherSnapshot(t *testing.T, cache map[string]interface{}) []byte {
+func patcherSnapshot(t *testing.T, cache []byte) []byte {
 	t.Helper()
-	data, err := json.Marshal(cache)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return data
+	return bytes.Clone(cache)
 }

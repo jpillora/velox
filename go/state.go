@@ -53,7 +53,8 @@ type State struct {
 		bytes   []byte
 		delta   []byte
 		version int64
-		patcher mergePatcher // caches unmarshaled prev state
+		cleared bool         // the last published state was JSON null
+		patcher mergePatcher // owns the raw previous state for merge patches
 	}
 	push struct {
 		mut    sync.Mutex
@@ -312,10 +313,11 @@ func (s *State) refresh() (changed bool, err error) {
 	s.data.mut.Lock()
 	defer s.data.mut.Unlock()
 	changed = false
-	if bytes.Equal(newBytes, []byte("null")) {
+	if isJSONNull(newBytes) {
 		// special case, clear data
 		s.data.bytes = nil
 		s.data.delta = nil
+		s.data.cleared = true
 		changed = true
 	} else if s.data.bytes != nil && s.data.patcher.prev != nil && bytes.Equal(newBytes, s.data.bytes) {
 		if s.Debug {
@@ -327,22 +329,32 @@ func (s *State) refresh() (changed bool, err error) {
 		if err != nil {
 			return false, fmt.Errorf("create-patch: %w", err)
 		}
-		// ensure non-nil after the patch has been validated
-		if s.data.bytes == nil {
-			s.data.bytes = []byte(`{}`)
-		}
-		// if changed,
-		if !bytes.Equal(delta, []byte(`{}`)) && len(delta) > 0 {
-			// then calculate change set from last version
-			// NOTE: patch may contain references to localStruct
-			s.data.delta = delta
+		if s.data.cleared {
+			// Clients have no document to patch after a null state. Publish the
+			// restored object as a full snapshot, even if it matches the cache
+			// from before the clear.
 			s.data.bytes = bytes.Clone(newBytes)
+			s.data.delta = nil
+			s.data.cleared = false
 			changed = true
-			if s.Debug {
-				log.Printf("velox: gopush changed, delta=%s", string(delta))
+		} else {
+			// ensure non-nil after the patch has been validated
+			if s.data.bytes == nil {
+				s.data.bytes = []byte(`{}`)
 			}
-		} else if s.Debug {
-			log.Printf("velox: gopush no change detected")
+			// if changed,
+			if !bytes.Equal(delta, []byte(`{}`)) && len(delta) > 0 {
+				// then calculate change set from last version
+				// NOTE: patch may contain references to localStruct
+				s.data.delta = delta
+				s.data.bytes = bytes.Clone(newBytes)
+				changed = true
+				if s.Debug {
+					log.Printf("velox: gopush changed, delta=%s", string(delta))
+				}
+			} else if s.Debug {
+				log.Printf("velox: gopush no change detected")
+			}
 		}
 	}
 	// bump if changed
@@ -350,4 +362,28 @@ func (s *State) refresh() (changed bool, err error) {
 		s.data.version++
 	}
 	return changed, nil
+}
+
+func isJSONNull(data []byte) bool {
+	i := 0
+	for i < len(data) && isJSONSpace(data[i]) {
+		i++
+	}
+	if len(data)-i < len("null") || !bytes.Equal(data[i:i+len("null")], []byte("null")) {
+		return false
+	}
+	i += len("null")
+	for i < len(data) && isJSONSpace(data[i]) {
+		i++
+	}
+	return i == len(data)
+}
+
+func isJSONSpace(c byte) bool {
+	switch c {
+	case ' ', '\t', '\r', '\n':
+		return true
+	default:
+		return false
+	}
 }
