@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"math"
 	"reflect"
 	"strconv"
 )
@@ -261,30 +260,29 @@ func validateJSONNumbers(data []byte) error {
 			i = scanJSONString(data, i)
 		case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
 			start := i
-			for i < len(data) {
-				switch data[i] {
-				case ',', '}', ']', ' ', '\t', '\r', '\n':
-					value, err := strconv.ParseFloat(string(data[start:i]), 64)
-					if err != nil && math.IsInf(value, 0) {
-						return err
-					}
-					goto next
-				default:
-					i++
-				}
+			for i < len(data) && !isJSONNumberDelimiter(data[i]) {
+				i++
 			}
-			value, err := strconv.ParseFloat(string(data[start:i]), 64)
-			if err != nil && math.IsInf(value, 0) {
+			// json.Valid has already ruled out syntax errors. ParseFloat can
+			// therefore fail here only when a finite JSON number overflows
+			// encoding/json's float64 representation.
+			if _, err := strconv.ParseFloat(string(data[start:i]), 64); err != nil {
 				return err
 			}
 		default:
 			i++
 		}
-		continue
-	next:
-		// Leave the delimiter for the next iteration.
 	}
 	return nil
+}
+
+func isJSONNumberDelimiter(c byte) bool {
+	switch c {
+	case ',', '}', ']', ' ', '\t', '\r', '\n':
+		return true
+	default:
+		return false
+	}
 }
 
 func sliceEqual(a, b []interface{}) bool {
