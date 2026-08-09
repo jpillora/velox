@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // benchState is a realistic struct that users would sync.
@@ -84,6 +86,77 @@ type largeBenchFixture struct {
 	deltaSize int
 	leafA     string
 	leafB     string
+}
+
+// signaledLargeBenchState preserves largeBenchState's JSON shape while making
+// the point at which Marshal has acquired its read lock observable.
+type signaledLargeBenchState struct {
+	*largeBenchState
+	rlockAcquired chan<- struct{}
+	releaseReader <-chan struct{}
+}
+
+func (s *signaledLargeBenchState) RLock() {
+	s.largeBenchState.RLock()
+	if s.rlockAcquired != nil {
+		s.rlockAcquired <- struct{}{}
+		<-s.releaseReader
+	}
+}
+
+func (s *signaledLargeBenchState) RUnlock() {
+	s.largeBenchState.RUnlock()
+}
+
+const largeWriterSampleLimit = 8_192
+
+type writerWaitSamples struct {
+	values []int64
+	total  int64
+	count  int64
+	max    int64
+}
+
+func newWriterWaitSamples() *writerWaitSamples {
+	return &writerWaitSamples{values: make([]int64, 0, largeWriterSampleLimit)}
+}
+
+func (s *writerWaitSamples) add(elapsed time.Duration) {
+	nanoseconds := elapsed.Nanoseconds()
+	s.total += nanoseconds
+	s.count++
+	s.max = max(s.max, nanoseconds)
+	if len(s.values) < cap(s.values) {
+		s.values = append(s.values, nanoseconds)
+	}
+}
+
+func (s *writerWaitSamples) report(b *testing.B) {
+	b.Helper()
+	if s.count == 0 {
+		return
+	}
+	ordered := append([]int64(nil), s.values...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+	valueAt := func(percentile int) float64 {
+		index := (len(ordered) - 1) * percentile / 100
+		return float64(ordered[index])
+	}
+	b.ReportMetric(float64(s.total)/float64(s.count), "writer-wait-mean-ns/op")
+	b.ReportMetric(valueAt(50), "writer-wait-p50-ns/op")
+	b.ReportMetric(valueAt(95), "writer-wait-p95-ns/op")
+	b.ReportMetric(valueAt(99), "writer-wait-p99-ns/op")
+	b.ReportMetric(float64(s.max), "writer-wait-max-ns/op")
+}
+
+func clockPairNanoseconds() float64 {
+	const iterations = 8_192
+	var total int64
+	for range iterations {
+		start := time.Now()
+		total += time.Since(start).Nanoseconds()
+	}
+	return float64(total) / iterations
 }
 
 type largeStateShape struct {
@@ -647,6 +720,148 @@ func BenchmarkLargeStateMarshal(b *testing.B) {
 	}
 	benchmarkBytes = out
 	b.ReportMetric(float64(len(fixture.unchanged)), "state_B/op")
+}
+
+// BenchmarkLargeStateMarshalContention measures a writer that collides with a
+// 341,817-byte Marshal. writer-during-marshal's ns/op includes orchestration and
+// marshal completion; writer-wait metrics cover only Lock acquisition after the
+// instrumented RLock has been acquired. The uncontended case provides the same
+// writer-wait measurement without a marshal, including time.Now overhead; its
+// ns/op is the instrumented Lock/mutate/Unlock loop.
+func BenchmarkLargeStateMarshalContention(b *testing.B) {
+	b.Run("writer-uncontended", func(b *testing.B) {
+		fixture := newLargeBenchFixture(b)
+		samples := newWriterWaitSamples()
+		clockPair := clockPairNanoseconds()
+		useLeafB := true
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			start := time.Now()
+			fixture.state.Lock()
+			waited := time.Since(start)
+			if useLeafB {
+				fixture.state.mutableLeaf["lastActivity"] = fixture.leafB
+			} else {
+				fixture.state.mutableLeaf["lastActivity"] = fixture.leafA
+			}
+			fixture.state.Unlock()
+			useLeafB = !useLeafB
+			samples.add(waited)
+		}
+		b.StopTimer()
+		samples.report(b)
+		b.ReportMetric(clockPair, "clock-pair-ns/op")
+	})
+
+	b.Run("writer-during-marshal", func(b *testing.B) {
+		fixture := newLargeBenchFixture(b)
+		wrapped := &signaledLargeBenchState{
+			largeBenchState: fixture.state,
+		}
+		marshal := Marshal(wrapped)
+		wrappedBytes, err := marshal()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(wrappedBytes) != largeStateTargetBytes || !bytes.Equal(wrappedBytes, fixture.unchanged) {
+			b.Fatalf("instrumented wrapper marshaled %d bytes; want exact %d-byte fixture", len(wrappedBytes), largeStateTargetBytes)
+		}
+
+		readerAcquired := make(chan struct{}, 1)
+		releaseReader := make(chan struct{}, 1)
+		wrapped.rlockAcquired = readerAcquired
+		wrapped.releaseReader = releaseReader
+
+		type marshalResult struct {
+			bytes json.RawMessage
+			err   error
+		}
+		marshalCommands := make(chan struct{})
+		marshalResults := make(chan marshalResult, 1)
+		marshalWorkerDone := make(chan struct{})
+		go func() {
+			defer close(marshalWorkerDone)
+			for range marshalCommands {
+				out, err := marshal()
+				marshalResults <- marshalResult{bytes: out, err: err}
+			}
+		}()
+
+		writerCommands := make(chan string)
+		writerResults := make(chan time.Duration, 1)
+		writerWorkerDone := make(chan struct{})
+		go func() {
+			defer close(writerWorkerDone)
+			for value := range writerCommands {
+				start := time.Now()
+				fixture.state.Lock()
+				waited := time.Since(start)
+				fixture.state.mutableLeaf["lastActivity"] = value
+				fixture.state.Unlock()
+				writerResults <- waited
+			}
+		}()
+
+		defer func() {
+			// A buffered release also frees a marshal worker that reached the
+			// hook while the benchmark goroutine was exiting early.
+			select {
+			case releaseReader <- struct{}{}:
+			default:
+			}
+			close(marshalCommands)
+			close(writerCommands)
+			<-marshalWorkerDone
+			<-writerWorkerDone
+		}()
+
+		samples := newWriterWaitSamples()
+		clockPair := clockPairNanoseconds()
+		useLeafB := true
+		var marshalErr error
+
+		b.ReportAllocs()
+		b.SetBytes(int64(len(fixture.unchanged)))
+		b.ResetTimer()
+		for b.Loop() {
+			marshalCommands <- struct{}{}
+			<-readerAcquired
+			if useLeafB {
+				writerCommands <- fixture.leafB
+			} else {
+				writerCommands <- fixture.leafA
+			}
+
+			// While the paused reader holds RLock, the writer cannot own the
+			// mutex. TryRLock failing therefore proves the writer is pending;
+			// RWMutex writer priority keeps it queued until Marshal's RUnlock.
+			for fixture.state.TryRLock() {
+				fixture.state.RUnlock()
+				runtime.Gosched()
+			}
+			releaseReader <- struct{}{}
+
+			useLeafB = !useLeafB
+			waited := <-writerResults
+			samples.add(waited)
+
+			result := <-marshalResults
+			if result.err != nil {
+				marshalErr = result.err
+				break
+			}
+			benchmarkBytes = result.bytes
+		}
+		b.StopTimer()
+		samples.report(b)
+		b.ReportMetric(clockPair, "clock-pair-ns/op")
+		b.ReportMetric(float64(len(fixture.unchanged)), "state_B/op")
+		if marshalErr != nil {
+			b.Fatal(marshalErr)
+		}
+	})
 }
 
 // BenchmarkLargeStateMergePatch isolates the unmarshal and objectDiff stages.
