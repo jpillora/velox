@@ -150,6 +150,7 @@ func TestSSEInvalidRefreshAndRequestCancelFullyUnwind(t *testing.T) {
 		<-release
 		return json.RawMessage(`{`), nil
 	}
+	s.push.generation.Add(1)
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "http://example.test/sync", nil).WithContext(ctx)
 	req.Header.Set("Accept", "text/event-stream")
@@ -237,6 +238,7 @@ func TestSSEGzipRefreshErrorCloseDoesNotWriteFooter(t *testing.T) {
 		w.block()
 		return json.RawMessage(`{`), nil
 	}
+	s.push.generation.Add(1)
 	req := httptest.NewRequest(http.MethodGet, "http://example.test/sync", nil)
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Accept-Encoding", "gzip")

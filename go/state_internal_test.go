@@ -512,6 +512,7 @@ func TestGopushNoSubscribersLeavesDataCacheUntouched(t *testing.T) {
 	prevPointer := reflect.ValueOf(prevCache).Pointer()
 	prevSnapshot := patcherSnapshot(t, prevCache)
 	atomic.StoreUint32(&s.push.ing, 1)
+	s.push.generation.Add(1)
 
 	done := make(chan struct{})
 	go func() {
@@ -529,6 +530,9 @@ func TestGopushNoSubscribersLeavesDataCacheUntouched(t *testing.T) {
 	}
 	if got := atomic.LoadUint32(&s.push.ing); got != 0 {
 		t.Fatalf("push.ing = %d, want 0", got)
+	}
+	if !s.cacheStale() {
+		t.Fatal("idle push did not leave the cache marked stale")
 	}
 	if got := reflect.ValueOf(s.data.bytes).Pointer(); got != bytesPointer {
 		t.Fatalf("cached bytes were replaced: got pointer %x, want %x", got, bytesPointer)
@@ -605,6 +609,24 @@ func TestGopushInitializesDirectStateBeforeIdleReturn(t *testing.T) {
 	}
 }
 
+func TestInitFailureCanRetryAfterDataIsConfigured(t *testing.T) {
+	s := &State{}
+	if err := s.init(); err == nil || !strings.Contains(err.Error(), "no data function") {
+		t.Fatalf("first init error = %v, want missing data error", err)
+	}
+	if s.initd.Load() {
+		t.Fatal("failed init was published as complete")
+	}
+
+	s.Data = func() (json.RawMessage, error) { return json.RawMessage(`{"value":1}`), nil }
+	if err := s.init(); err != nil {
+		t.Fatalf("retry init: %v", err)
+	}
+	if !s.initd.Load() || s.data.version != 1 || !bytes.Equal(s.data.bytes, []byte(`{"value":1}`)) {
+		t.Fatalf("retry did not initialize state: initd=%v version=%d bytes=%s", s.initd.Load(), s.data.version, s.data.bytes)
+	}
+}
+
 func TestGopushActiveConnectionRefreshesAndBroadcasts(t *testing.T) {
 	var value atomic.Int64
 	var calls atomic.Int32
@@ -638,15 +660,15 @@ func TestGopushActiveConnectionRefreshesAndBroadcasts(t *testing.T) {
 		t.Fatal("active connection did not receive broadcast")
 	}
 	waitForPushIdle(t, s)
-	if got := calls.Load(); got != 3 {
-		t.Fatalf("Data calls = %d, want 3 (init, subscribe, gopush)", got)
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("Data calls = %d, want 2 (init, gopush)", got)
 	}
 	if got := atomic.LoadUint32(&s.push.ing); got != 0 {
 		t.Fatalf("push.ing = %d, want 0", got)
 	}
 }
 
-func TestSubscribeRefreshesEverySubscriber(t *testing.T) {
+func TestSubscribeUsesFreshCacheWithoutMarshal(t *testing.T) {
 	var calls atomic.Int32
 	s := New(func() (json.RawMessage, error) {
 		calls.Add(1)
@@ -663,23 +685,124 @@ func TestSubscribeRefreshesEverySubscriber(t *testing.T) {
 	if err := s.subscribe(first); err != nil {
 		t.Fatal(err)
 	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("Data calls after first subscriber = %d, want 2", got)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("Data calls after first subscriber = %d, want 1", got)
 	}
 	if err := s.subscribe(second); err != nil {
 		t.Fatal(err)
 	}
-	if got := calls.Load(); got != 3 {
-		t.Fatalf("Data calls after second subscriber = %d, want 3", got)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("Data calls after second subscriber = %d, want 1", got)
 	}
 	if got := s.NumConnections(); got != 2 {
 		t.Fatalf("connections = %d, want 2", got)
 	}
 }
 
-func TestSubscriberRefreshChangePushesExistingConnections(t *testing.T) {
+func TestConcurrentSubscribersRefreshIdleStaleCacheOnce(t *testing.T) {
+	var value atomic.Int64
+	var calls atomic.Int32
 	s := New(func() (json.RawMessage, error) {
-		return json.RawMessage("null"), nil
+		calls.Add(1)
+		return json.RawMessage(fmt.Sprintf(`{"value":%d}`, value.Load())), nil
+	})
+	value.Store(1)
+	if !s.Push() {
+		t.Fatal("idle Push did not start")
+	}
+	waitForPushIdle(t, s)
+	if !s.cacheStale() {
+		t.Fatal("idle Push did not mark cache stale")
+	}
+
+	const count = 50
+	conns := make([]*conn, count)
+	errCh := make(chan error, count)
+	var subscribers sync.WaitGroup
+	for i := range conns {
+		conns[i] = newConn(int64(i+1), "storm", s, 0)
+		conns[i].transport = &recordingTransport{updates: make(chan Update, 1)}
+		subscribers.Add(1)
+		go func(c *conn) {
+			defer subscribers.Done()
+			errCh <- s.subscribe(c)
+		}(conns[i])
+	}
+	subscribers.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("Data calls after %d concurrent subscribers = %d, want 2 total", count, got)
+	}
+	if s.cacheStale() {
+		t.Fatal("subscriber refresh left cache stale")
+	}
+	if got := s.Version(); got != 2 {
+		t.Fatalf("version = %d, want 2", got)
+	}
+	for _, c := range conns {
+		close(c.connectedCh)
+	}
+	waitForConnections(t, s, 0)
+}
+
+func TestFreshSubscribeDoesNotWaitForPushMutex(t *testing.T) {
+	s := New(func() (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
+	c := newConn(1, "fresh", s, 0)
+	s.push.mut.Lock()
+	done := make(chan error, 1)
+	go func() { done <- s.subscribe(c) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		s.push.mut.Unlock()
+		t.Fatal("fresh subscribe waited for push mutex")
+	}
+	s.push.mut.Unlock()
+	close(c.connectedCh)
+	waitForConnections(t, s, 0)
+}
+
+func TestPushConnectionsDoesNotHoldConnectionMutexWhileReadingVersions(t *testing.T) {
+	s := New(func() (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
+	c := newConn(1, "blocked", s, s.Version())
+	c.transport = &recordingTransport{updates: make(chan Update, 1)}
+	s.connMut.Lock()
+	s.conns[c.id] = c
+	s.connMut.Unlock()
+
+	// Model a transport write: conn.send holds sendVerMut for the duration of
+	// the I/O. Broadcasting must not retain connMut while it waits.
+	c.sendVerMut.Lock()
+	done := make(chan struct{})
+	go func() {
+		s.pushConnections(nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		c.sendVerMut.Unlock()
+		t.Fatal("pushConnections blocked on a connection version")
+	}
+	if got := s.NumConnections(); got != 1 {
+		c.sendVerMut.Unlock()
+		t.Fatalf("connections = %d, want 1", got)
+	}
+	c.sendVerMut.Unlock()
+}
+
+func TestStaleSubscriberRefreshChangePushesExistingConnections(t *testing.T) {
+	var value atomic.Int64
+	s := New(func() (json.RawMessage, error) {
+		return json.RawMessage(fmt.Sprintf(`{"value":%d}`, value.Load())), nil
 	})
 	updates := make(chan Update, 1)
 	existing := newConn(1, "existing", s, 0)
@@ -697,6 +820,8 @@ func TestSubscriberRefreshChangePushesExistingConnections(t *testing.T) {
 	existing.sendVerMut.Lock()
 	existing.version = s.Version()
 	existing.sendVerMut.Unlock()
+	value.Store(1)
+	s.push.generation.Add(1)
 	if err := s.subscribe(newSubscriber); err != nil {
 		t.Fatal(err)
 	}
@@ -706,11 +831,9 @@ func TestSubscriberRefreshChangePushesExistingConnections(t *testing.T) {
 		if update.Version != s.Version() {
 			t.Fatalf("existing subscriber version = %d, want %d", update.Version, s.Version())
 		}
-		if update.Body != nil {
-			t.Fatalf("existing subscriber body = %s, want nil null snapshot", update.Body)
-		}
+		assertStateValue(t, update, 1)
 	case <-time.After(time.Second):
-		t.Fatal("existing subscriber did not receive subscriber-triggered change")
+		t.Fatal("existing subscriber did not receive stale-cache refresh")
 	}
 }
 
@@ -768,6 +891,7 @@ func TestSubscribeRefreshErrorDoesNotSubscribe(t *testing.T) {
 		return json.RawMessage(`{"value":1}`), nil
 	})
 	s.Data = func() (json.RawMessage, error) { return nil, wantErr }
+	s.push.generation.Add(1)
 	c := newConn(1, "failed", s, 0)
 
 	err := s.subscribe(c)
@@ -785,6 +909,7 @@ func TestHandleRefreshErrorClosesConnectedTransport(t *testing.T) {
 		return json.RawMessage(`{"value":1}`), nil
 	})
 	s.Data = func() (json.RawMessage, error) { return nil, wantErr }
+	s.push.generation.Add(1)
 	handleErr := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, err := s.Handle(w, r)
@@ -850,6 +975,7 @@ func TestHandleDataPanicUnwindsAndStateRemainsUsable(t *testing.T) {
 		return transport
 	}
 	s.Data = func() (json.RawMessage, error) { panic("custom marshal panic") }
+	s.push.generation.Add(1)
 
 	_, err := s.Handle(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "http://example.test/sync", nil))
 	var committed *responseCommittedError
@@ -901,6 +1027,7 @@ func TestHandleInvalidJSONClosesConnectedTransportAndStateRecovers(t *testing.T)
 		return json.RawMessage(`{"value":1}`), nil
 	})
 	s.Data = func() (json.RawMessage, error) { return json.RawMessage(`{`), nil }
+	s.push.generation.Add(1)
 	handleErr := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, err := s.Handle(w, r)
@@ -947,6 +1074,7 @@ func TestServeHTTPCommittedRefreshErrorDoesNotAppendHTTPError(t *testing.T) {
 				return json.RawMessage(`{"value":1}`), nil
 			})
 			s.Data = func() (json.RawMessage, error) { return json.RawMessage(`{`), nil }
+			s.push.generation.Add(1)
 			req := httptest.NewRequest(http.MethodGet, "http://example.test/sync", nil)
 			req.Header.Set("Accept", "text/event-stream")
 			if gzipEnabled {
@@ -971,6 +1099,7 @@ func TestServeHTTPWebsocketRefreshErrorDoesNotWriteAfterHijack(t *testing.T) {
 		return json.RawMessage(`{"value":1}`), nil
 	})
 	s.Data = func() (json.RawMessage, error) { return json.RawMessage(`{`), nil }
+	s.push.generation.Add(1)
 	var serverLogs bytes.Buffer
 	server := httptest.NewUnstartedServer(s)
 	server.Config.ErrorLog = log.New(&serverLogs, "", 0)
