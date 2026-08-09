@@ -679,6 +679,50 @@ func TestInitMarshalFailureRecoversWithFullSnapshot(t *testing.T) {
 	}
 }
 
+func TestStateVersionAndIDReadSafelyDuringRefresh(t *testing.T) {
+	var value atomic.Int64
+	s := New(func() (json.RawMessage, error) {
+		return json.Marshal(struct {
+			Value int64 `json:"value"`
+		}{value.Load()})
+	})
+	if err := s.init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// the race detector is the assertion here: both accessors are public and
+	// refresh writes the fields they read.
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = s.Version()
+					_ = s.ID()
+				}
+			}
+		}()
+	}
+	for i := 0; i < 200; i++ {
+		value.Add(1)
+		if _, err := s.refresh(); err != nil {
+			t.Errorf("refresh: %v", err)
+			break
+		}
+	}
+	close(stop)
+	readers.Wait()
+	if got := s.Version(); got != 201 {
+		t.Fatalf("version = %d, want 201", got)
+	}
+}
+
 func TestGopushActiveConnectionRefreshesAndBroadcasts(t *testing.T) {
 	var value atomic.Int64
 	var calls atomic.Int32

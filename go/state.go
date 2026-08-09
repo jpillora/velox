@@ -184,12 +184,17 @@ func (state *State) Handle(w http.ResponseWriter, r *http.Request) (Conn, error)
 
 // ID uniquely identifies this state object
 func (s *State) ID() string {
+	s.data.mut.RLock()
+	defer s.data.mut.RUnlock()
 	return s.data.id
 }
 
 // Version of this state object (when the underlying struct is
 // and a Push is performed, this version number is incremented).
+// refresh writes version under data.mut, so reads must be guarded.
 func (s *State) Version() int64 {
+	s.data.mut.RLock()
+	defer s.data.mut.RUnlock()
 	return s.data.version
 }
 
