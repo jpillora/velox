@@ -39,9 +39,11 @@ func (g *gzipResponseWriter) Flush() {
 	}
 }
 
-// close finalizes the gzip stream and returns the writer to the pool.
-func (g *gzipResponseWriter) close() {
-	g.gz.Close()
+// abort discards the current gzip stream without writing a footer, then
+// returns the reset writer to the pool. SSE disconnects do not require a
+// complete gzip stream, and the underlying writer may block indefinitely.
+func (g *gzipResponseWriter) abort() {
+	g.gz.Reset(io.Discard)
 	gzipWriterPool.Put(g.gz)
 }
 

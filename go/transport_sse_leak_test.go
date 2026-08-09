@@ -34,14 +34,14 @@ func countSendGoroutines() int {
 // goroutine can deposit its result and exit
 func TestSSESendTimeoutNoGoroutineLeak(t *testing.T) {
 	gw := &gateWriter{gate: make(chan struct{}), h: http.Header{}}
-	es := &eventSourceTransport{
-		writeTimeout: 5 * time.Millisecond,
-		isConnected:  true,
-		w:            gw,
-	}
 	before := countSendGoroutines()
 	const n = 10
 	for i := range n {
+		es := &eventSourceTransport{
+			writeTimeout: 5 * time.Millisecond,
+			isConnected:  true,
+			w:            gw,
+		}
 		err := es.send(&Update{Version: int64(i)})
 		if err == nil || err.Error() != "timeout" {
 			t.Fatalf("send %d: expected timeout, got %v", i, err)

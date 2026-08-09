@@ -18,25 +18,16 @@ var encodePool = sync.Pool{
 }
 
 type eventSourceTransport struct {
-	mut          sync.Mutex
-	writeTimeout time.Duration
-	w            http.ResponseWriter
-	gzw          *gzipResponseWriter // non-nil if gzip is active
-	isConnected  bool
-	connected    chan struct{}
+	mut             sync.Mutex
+	writeTimeout    time.Duration
+	w               http.ResponseWriter
+	gzw             *gzipResponseWriter // non-nil if gzip is active
+	writerAbandoned bool                // a timed-out child may still be using w
+	isConnected     bool
+	connected       chan struct{}
 }
 
 func (es *eventSourceTransport) connect(w http.ResponseWriter, r *http.Request) error {
-	//connection controls
-	es.isConnected = true
-	es.connected = make(chan struct{})
-	go func() {
-		select {
-		case <-es.connected:
-		case <-r.Context().Done(): //client disconnected early
-			es.close()
-		}
-	}()
 	//eventsource headers
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Vary", "Accept")
@@ -54,21 +45,35 @@ func (es *eventSourceTransport) connect(w http.ResponseWriter, r *http.Request) 
 			}
 			es.gzw = gzw
 			es.w = gzw
-			return nil
 		}
 	}
 	//connection is now expecting a stream of events
-	es.w = w
+	if es.w == nil {
+		es.w = w
+	}
+	es.mut.Lock()
+	es.isConnected = true
+	es.connected = make(chan struct{})
+	connected := es.connected
+	es.mut.Unlock()
+	go func() {
+		select {
+		case <-connected:
+		case <-r.Context().Done(): //client disconnected early
+			es.close()
+		}
+	}()
 	return nil
 }
 
 // http.ResponseWriter.Write is not thread safe, so we need to lock
 func (es *eventSourceTransport) send(upd *Update) error {
-	if !es.IsConnected() {
-		return errors.New("not connected")
-	}
 	es.mut.Lock()
 	defer es.mut.Unlock()
+	if !es.isConnected || es.writerAbandoned {
+		return errors.New("not connected")
+	}
+	writer := es.w
 
 	buf := encodePool.Get().(*bytes.Buffer)
 	buf.Reset()
@@ -87,7 +92,7 @@ func (es *eventSourceTransport) send(upd *Update) error {
 	// deposit its result and exit instead of blocking forever
 	sent := make(chan error, 1)
 	go func() {
-		err := eventsource.WriteEvent(es.w, eventsource.Event{
+		err := eventsource.WriteEvent(writer, eventsource.Event{
 			ID:   strconv.FormatInt(upd.Version, 10),
 			Data: b,
 		})
@@ -95,6 +100,7 @@ func (es *eventSourceTransport) send(upd *Update) error {
 	}()
 	select {
 	case <-time.After(es.writeTimeout):
+		es.writerAbandoned = true
 		// don't return buf to pool; goroutine may still be writing
 		return errors.New("timeout")
 	case err := <-sent:
@@ -115,16 +121,20 @@ func (es *eventSourceTransport) IsConnected() bool {
 }
 
 func (es *eventSourceTransport) close() error {
-	if es.IsConnected() {
-		es.mut.Lock()
-		if es.gzw != nil {
-			es.gzw.close()
-			es.gzw = nil
-		}
-		es.isConnected = false
-		es.mut.Unlock()
-		//unblocking the wait, causes the http handler to return
-		close(es.connected)
+	es.mut.Lock()
+	defer es.mut.Unlock()
+	if !es.isConnected {
+		return nil
 	}
+	es.isConnected = false
+	if es.gzw != nil {
+		if !es.writerAbandoned {
+			es.gzw.abort()
+		}
+		es.gzw = nil
+	}
+	es.w = nil
+	//unblocking the wait causes the HTTP handler to return
+	close(es.connected)
 	return nil
 }
