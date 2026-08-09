@@ -54,7 +54,7 @@ type State struct {
 		bytes   []byte
 		delta   []byte
 		version int64
-		cleared bool         // the last published state was JSON null
+		cleared bool         // clients hold no document: state was null or never published
 		patcher mergePatcher // owns the raw previous state for merge patches
 	}
 	push struct {
@@ -91,13 +91,24 @@ func (s *State) init() error {
 	// leaving this initial snapshot stale for the push worker or subscriber.
 	generation := s.push.generation.Load()
 	//get initial JSON bytes and confirm gostruct is marshallable
-	b, _ := s.Data()
-	b = bytes.Clone(b)
+	b, err := s.Data()
 	// set data fields
 	s.data.mut.Lock()
-	s.data.bytes = b
 	// seed the merge patcher cache with the initial state
-	s.data.patcher.patch(b)
+	if err == nil {
+		b = bytes.Clone(b)
+		_, err = s.data.patcher.patch(b)
+	}
+	if err != nil {
+		// Nothing usable was published, so treat clients as holding no document.
+		// The first successful refresh then sends a full snapshot: diffing a
+		// valid state against an empty patcher cache yields {}, which reports no
+		// change and would strand every client on the empty document forever.
+		log.Printf("velox: initial marshal failed: %s", err)
+		b = nil
+		s.data.cleared = true
+	}
+	s.data.bytes = b
 	id := make([]byte, 4)
 	if n, _ := rand.Read(id); n > 0 {
 		s.data.id = hex.EncodeToString(id)

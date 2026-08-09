@@ -627,6 +627,58 @@ func TestInitFailureCanRetryAfterDataIsConfigured(t *testing.T) {
 	}
 }
 
+func TestInitMarshalFailureRecoversWithFullSnapshot(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		initial func() (json.RawMessage, error)
+	}{
+		{"marshal error", func() (json.RawMessage, error) {
+			return nil, errors.New("not ready")
+		}},
+		{"invalid JSON", func() (json.RawMessage, error) {
+			return json.RawMessage(`{"broken":`), nil
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var ready atomic.Bool
+			s := New(func() (json.RawMessage, error) {
+				if !ready.Load() {
+					return test.initial()
+				}
+				return json.RawMessage(`{"value":42}`), nil
+			})
+			if err := s.init(); err != nil {
+				t.Fatalf("init: %v", err)
+			}
+			if s.data.bytes != nil || !s.data.cleared {
+				t.Fatalf("unusable initial state published: bytes=%s cleared=%v", s.data.bytes, s.data.cleared)
+			}
+
+			// once the data function recovers, clients must receive the state
+			ready.Store(true)
+			changed, err := s.refresh()
+			if err != nil {
+				t.Fatalf("refresh: %v", err)
+			}
+			if !changed {
+				t.Fatal("recovered state reported no change; clients stay stranded")
+			}
+			if !bytes.Equal(s.data.bytes, []byte(`{"value":42}`)) {
+				t.Fatalf("published bytes = %s, want full snapshot", s.data.bytes)
+			}
+			if s.data.delta != nil {
+				t.Fatalf("delta = %s, want full snapshot for a client with no document", s.data.delta)
+			}
+			if s.data.cleared {
+				t.Fatal("cleared not reset after publishing a snapshot")
+			}
+			if s.data.version != 2 {
+				t.Fatalf("version = %d, want 2", s.data.version)
+			}
+		})
+	}
+}
+
 func TestGopushActiveConnectionRefreshesAndBroadcasts(t *testing.T) {
 	var value atomic.Int64
 	var calls atomic.Int32
