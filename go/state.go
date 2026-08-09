@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -41,11 +42,12 @@ type State struct {
 	PingInterval time.Duration `json:"-"` // PingInterval is the time between pings to the client.
 	Debug        bool          `json:"-"` // Debug is used to enable debug logging.
 	//internal state
-	initMut sync.Mutex
-	initd   bool
-	connMut sync.Mutex
-	conns   map[int64]*conn
-	data    struct {
+	initMut          sync.Mutex
+	initd            atomic.Bool
+	connMut          sync.Mutex
+	conns            map[int64]*conn
+	transportFactory func(*http.Request) transport
+	data             struct {
 		mut     sync.RWMutex
 		id      string //data id != conn id
 		bytes   []byte
@@ -61,12 +63,15 @@ type State struct {
 }
 
 func (s *State) init() error {
-	s.initMut.Lock()
-	defer s.initMut.Unlock()
-	if s.initd {
+	if s.initd.Load() {
 		return nil
 	}
-	s.initd = true
+	s.initMut.Lock()
+	defer s.initMut.Unlock()
+	if s.initd.Load() {
+		return nil
+	}
+	defer s.initd.Store(true)
 	if s.Throttle < MinThrottle {
 		s.Throttle = DefaultThrottle
 	}
@@ -108,11 +113,24 @@ func (s *State) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.Handle(w, r)
 	if err != nil {
 		log.Printf("velox: serve: %s", err)
+		var committed *responseCommittedError
+		if errors.As(err, &committed) {
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	conn.Wait()
 }
+
+// responseCommittedError marks failures after a transport has already
+// committed the HTTP response or hijacked the connection.
+type responseCommittedError struct {
+	err error
+}
+
+func (e *responseCommittedError) Error() string { return e.err.Error() }
+func (e *responseCommittedError) Unwrap() error { return e.err }
 
 func (state *State) Handle(w http.ResponseWriter, r *http.Request) (Conn, error) {
 	if err := state.init(); err != nil {
@@ -131,10 +149,14 @@ func (state *State) Handle(w http.ResponseWriter, r *http.Request) (Conn, error)
 	//(negotiate websockets / start eventsource emitter)
 	//return when connected
 	if err := conn.connect(w, r); err != nil {
-		return nil, fmt.Errorf("velox connection failed: %s", err)
+		return nil, fmt.Errorf("velox connection failed: %w", err)
 	}
 	//hand over to state to keep in sync
-	state.subscribe(conn)
+	if err := state.subscribe(conn); err != nil {
+		conn.Close()
+		conn.Wait()
+		return nil, &responseCommittedError{err: fmt.Errorf("velox initial refresh failed: %w", err)}
+	}
 	//do an initial push only to this client
 	conn.Push()
 	//pass connection to user
@@ -152,12 +174,32 @@ func (s *State) Version() int64 {
 	return s.data.version
 }
 
-func (s *State) subscribe(conn *conn) {
-	//subscribe
-	conn.waiter.Add(1)
-	s.connMut.Lock()
-	s.conns[conn.id] = conn
-	s.connMut.Unlock()
+func (s *State) subscribe(conn *conn) error {
+	// Serialise initial refreshes with gopush so every subscriber gets a
+	// current first snapshot, including replacements for connections whose
+	// asynchronous removal has not completed yet.
+	s.push.mut.Lock()
+	var changed bool
+	var err error
+	func() {
+		defer s.push.mut.Unlock()
+		changed, err = s.refresh()
+		if err != nil {
+			return
+		}
+
+		//subscribe
+		conn.waiter.Add(1)
+		s.connMut.Lock()
+		s.conns[conn.id] = conn
+		s.connMut.Unlock()
+	}()
+	if err != nil {
+		return err
+	}
+	if changed {
+		s.pushConnections(conn)
+	}
 	//and then unsubscribe on close
 	go func() {
 		<-conn.connectedCh //this unblocks before wait
@@ -166,6 +208,7 @@ func (s *State) subscribe(conn *conn) {
 		s.connMut.Unlock()
 		conn.waiter.Done()
 	}()
+	return nil
 }
 
 // NumConnections currently active
@@ -203,13 +246,15 @@ func (s *State) Push() bool {
 func (s *State) gopush() {
 	s.init()
 	s.push.mut.Lock()
-	t0 := time.Now()
+	var t0 time.Time
 	//queue cleanup
 	defer func() {
-		//measure time passed, ensure we wait at least Throttle time
-		tdelta := time.Since(t0)
-		if t := s.Throttle - tdelta; t > 0 {
-			time.Sleep(t)
+		// Active pushes are throttled. Idle pushes return immediately.
+		if !t0.IsZero() {
+			tdelta := time.Since(t0)
+			if t := s.Throttle - tdelta; t > 0 {
+				time.Sleep(t)
+			}
 		}
 		//push complete
 		s.push.mut.Unlock()
@@ -219,17 +264,54 @@ func (s *State) gopush() {
 			s.Push()
 		}
 	}()
+	if s.NumConnections() == 0 {
+		return
+	}
+	t0 = time.Now()
+	if _, err := s.refresh(); err != nil {
+		log.Printf("velox: refresh failed: %s", err)
+		return
+	}
+	s.pushConnections(nil)
+	//defered cleanup()
+}
+
+// pushConnections schedules out-of-date connections without holding any lock
+// across network I/O. except is used for a new subscriber whose initial Push
+// is performed synchronously by Handle.
+func (s *State) pushConnections(except *conn) {
+	s.data.mut.RLock()
+	dversion := s.data.version
+	s.data.mut.RUnlock()
+	s.connMut.Lock()
+	for _, c := range s.conns {
+		if c != except && c.Version() != dversion {
+			go c.Push()
+		}
+	}
+	s.connMut.Unlock()
+}
+
+// refresh synchronously updates the marshaled state and merge-patch cache.
+// The caller is responsible for serialising refreshes with push.mut.
+func (s *State) refresh() (changed bool, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			changed = false
+			err = fmt.Errorf("data panic: %v", recovered)
+		}
+	}()
 	//calculate new json state
 	newBytes, err := s.Data()
 	if err != nil {
-		log.Printf("velox: marshal failed: %s", err)
-		return
+		return false, err
 	}
 	if s.Debug {
 		log.Printf("velox: gopush marshaled %d bytes", len(newBytes))
 	}
 	s.data.mut.Lock()
-	changed := false
+	defer s.data.mut.Unlock()
+	changed = false
 	if bytes.Equal(newBytes, []byte("null")) {
 		// special case, clear data
 		s.data.bytes = nil
@@ -240,14 +322,14 @@ func (s *State) gopush() {
 			log.Printf("velox: gopush no change detected")
 		}
 	} else {
-		// ensure non-nil
-		if s.data.bytes == nil {
-			s.data.bytes = []byte(`{}`)
-		}
 		// steps to go from local to remote, capture changes
 		delta, err := s.data.patcher.patch(newBytes)
 		if err != nil {
-			panic(fmt.Errorf("create-patch: %w", err))
+			return false, fmt.Errorf("create-patch: %w", err)
+		}
+		// ensure non-nil after the patch has been validated
+		if s.data.bytes == nil {
+			s.data.bytes = []byte(`{}`)
 		}
 		// if changed,
 		if !bytes.Equal(delta, []byte(`{}`)) && len(delta) > 0 {
@@ -267,15 +349,5 @@ func (s *State) gopush() {
 	if changed {
 		s.data.version++
 	}
-	dversion := s.data.version
-	s.data.mut.Unlock()
-	//send this new change to each subscriber
-	s.connMut.Lock()
-	for _, c := range s.conns {
-		if c.Version() != dversion {
-			go c.Push()
-		}
-	}
-	s.connMut.Unlock()
-	//defered cleanup()
+	return changed, nil
 }

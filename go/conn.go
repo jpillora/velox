@@ -77,7 +77,9 @@ func (c *conn) Close() error {
 // and block until connection is ready
 func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 	//choose transport
-	if r.Header.Get("Accept") == "text/event-stream" {
+	if c.state.transportFactory != nil {
+		c.transport = c.state.transportFactory(r)
+	} else if r.Header.Get("Accept") == "text/event-stream" {
 		c.transport = &eventSourceTransport{writeTimeout: c.state.WriteTimeout}
 	} else if r.Header.Get("Upgrade") == "websocket" {
 		c.transport = &websocketsTransport{writeTimeout: c.state.WriteTimeout}
@@ -90,7 +92,8 @@ func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 	}
 	//initial ping
 	if err := c.send(&Update{Ping: true}); err != nil {
-		return fmt.Errorf("failed to send initial event")
+		c.transport.close()
+		return &responseCommittedError{err: fmt.Errorf("failed to send initial event: %w", err)}
 	}
 	//successfully connected
 	c.connected = true
