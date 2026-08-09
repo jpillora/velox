@@ -714,20 +714,25 @@ func BenchmarkLargeStateFullPushCycle(b *testing.B) {
 		if _, err := patcher.patch(fixture.unchanged); err != nil {
 			b.Fatal(err)
 		}
+		previousBytes := bytes.Clone(fixture.unchanged)
+		delta := []byte(`{}`)
 
 		b.ReportAllocs()
 		b.SetBytes(int64(len(fixture.unchanged)))
 		b.ResetTimer()
-		var delta []byte
 		for b.Loop() {
 			stateBytes, err := fixture.marshal()
 			if err != nil {
 				b.Fatal(err)
 			}
+			if bytes.Equal(stateBytes, previousBytes) {
+				continue
+			}
 			delta, err = patcher.patch(stateBytes)
 			if err != nil {
 				b.Fatal(err)
 			}
+			previousBytes = bytes.Clone(stateBytes)
 		}
 		benchmarkBytes = delta
 		b.ReportMetric(float64(len(delta)), "delta_B/op")
@@ -740,6 +745,7 @@ func BenchmarkLargeStateFullPushCycle(b *testing.B) {
 		if _, err := patcher.patch(fixture.unchanged); err != nil {
 			b.Fatal(err)
 		}
+		previousBytes := bytes.Clone(fixture.unchanged)
 
 		b.ReportAllocs()
 		b.SetBytes(int64(len(fixture.unchanged)))
@@ -758,10 +764,14 @@ func BenchmarkLargeStateFullPushCycle(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
+			if bytes.Equal(stateBytes, previousBytes) {
+				continue
+			}
 			delta, err = patcher.patch(stateBytes)
 			if err != nil {
 				b.Fatal(err)
 			}
+			previousBytes = bytes.Clone(stateBytes)
 			changed = !changed
 		}
 		benchmarkBytes = delta

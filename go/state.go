@@ -45,7 +45,7 @@ type State struct {
 	initd   bool
 	connMut sync.Mutex
 	conns   map[int64]*conn
-	data struct {
+	data    struct {
 		mut     sync.RWMutex
 		id      string //data id != conn id
 		bytes   []byte
@@ -81,6 +81,7 @@ func (s *State) init() error {
 	}
 	//get initial JSON bytes and confirm gostruct is marshallable
 	b, _ := s.Data()
+	b = bytes.Clone(b)
 	// set data fields
 	s.data.mut.Lock()
 	s.data.bytes = b
@@ -234,6 +235,10 @@ func (s *State) gopush() {
 		s.data.bytes = nil
 		s.data.delta = nil
 		changed = true
+	} else if s.data.bytes != nil && s.data.patcher.prev != nil && bytes.Equal(newBytes, s.data.bytes) {
+		if s.Debug {
+			log.Printf("velox: gopush no change detected")
+		}
 	} else {
 		// ensure non-nil
 		if s.data.bytes == nil {
@@ -249,7 +254,7 @@ func (s *State) gopush() {
 			// then calculate change set from last version
 			// NOTE: patch may contain references to localStruct
 			s.data.delta = delta
-			s.data.bytes = newBytes
+			s.data.bytes = bytes.Clone(newBytes)
 			changed = true
 			if s.Debug {
 				log.Printf("velox: gopush changed, delta=%s", string(delta))
