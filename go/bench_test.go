@@ -780,6 +780,30 @@ func BenchmarkLargeStateFullPushCycle(b *testing.B) {
 	})
 }
 
+// BenchmarkLargeStateGopushNoSubscribers measures the synchronous idle
+// decision. The large fixture is attached to Data, but the timed loop must not
+// marshal or diff it.
+func BenchmarkLargeStateGopushNoSubscribers(b *testing.B) {
+	fixture := newLargeBenchFixture(b)
+	calls := 0
+	s := New(func() (json.RawMessage, error) {
+		calls++
+		return fixture.marshal()
+	})
+	initialCalls := calls
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		s.gopush()
+	}
+	b.StopTimer()
+	if calls != initialCalls {
+		b.Fatalf("idle gopush called Data %d times", calls-initialCalls)
+	}
+	b.ReportMetric(float64(len(fixture.unchanged)), "skipped_state_B/op")
+}
+
 // -------------------------------------------------------------------
 // Pooled buffer encoder
 // -------------------------------------------------------------------
