@@ -107,6 +107,9 @@ func (s *State) init() error {
 		log.Printf("velox: initial marshal failed: %s", err)
 		b = nil
 		s.data.cleared = true
+		// Ensure the first subscriber retries Data even if no explicit Push
+		// occurs between this failure and the connection attempt.
+		s.push.generation.Add(1)
 	}
 	s.data.bytes = b
 	id := make([]byte, 4)

@@ -653,16 +653,19 @@ func TestInitMarshalFailureRecoversWithFullSnapshot(t *testing.T) {
 			if s.data.bytes != nil || !s.data.cleared {
 				t.Fatalf("unusable initial state published: bytes=%s cleared=%v", s.data.bytes, s.data.cleared)
 			}
+			if !s.cacheStale() {
+				t.Fatal("failed initial state was published as fresh")
+			}
 
-			// once the data function recovers, clients must receive the state
+			// Once the data function recovers, the first subscriber must trigger
+			// the refresh even when the application did not call Push explicitly.
 			ready.Store(true)
-			changed, err := s.refresh()
-			if err != nil {
-				t.Fatalf("refresh: %v", err)
+			conn := newConn(1, "recovery", s, 0)
+			if err := s.subscribe(conn); err != nil {
+				t.Fatalf("subscribe: %v", err)
 			}
-			if !changed {
-				t.Fatal("recovered state reported no change; clients stay stranded")
-			}
+			close(conn.connectedCh)
+			waitForConnections(t, s, 0)
 			if !bytes.Equal(s.data.bytes, []byte(`{"value":42}`)) {
 				t.Fatalf("published bytes = %s, want full snapshot", s.data.bytes)
 			}
@@ -674,6 +677,9 @@ func TestInitMarshalFailureRecoversWithFullSnapshot(t *testing.T) {
 			}
 			if s.data.version != 2 {
 				t.Fatalf("version = %d, want 2", s.data.version)
+			}
+			if s.cacheStale() {
+				t.Fatal("successful subscriber refresh left cache stale")
 			}
 		})
 	}

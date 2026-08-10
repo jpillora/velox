@@ -14,8 +14,9 @@ func NewAny(data any) *State {
 	return New(Marshal(data))
 }
 
-// New creates a new State object with the given data function.
-// Data must not return an error otherwise New will panic.
+// New creates a new State object with the given data function. An initial Data
+// error leaves the state unpublished and is retried by the next subscriber or
+// by a Push with an active subscriber.
 func New(data MarshalFunc) *State {
 	s := &State{
 		Data:         data,
