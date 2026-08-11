@@ -60,6 +60,15 @@ func bindValue(v reflect.Value, locker sync.Locker, pusher Pusher, root bool) {
 		// deadlocks or unprotected concurrent access.
 		if !root && v.CanAddr() && v.Addr().CanInterface() {
 			iface := v.Addr().Interface()
+			// The lock velox was handed is reachable from the state that
+			// names it, and it is the parent lock rather than a rival to it.
+			// Only sync.Mutex and sync.RWMutex used to get past here, which
+			// left no way to supply an instrumented or otherwise wrapped
+			// Locker — the caller got this panic for using the very field
+			// velox asked them to set.
+			if iface == any(locker) {
+				return
+			}
 			_, isBind := iface.(bindable)
 			_, isLock := iface.(sync.Locker)
 			if isLock && !isBind {

@@ -523,3 +523,46 @@ func TestVMapAndVSliceTogether(t *testing.T) {
 		t.Errorf("Counts views = %d, want 100", v)
 	}
 }
+
+// The lock velox is handed is reachable from the state that names it, through
+// the very field velox asks the caller to set. Treating it as a rival lock left
+// no way to pass a wrapped Locker — an instrumented one, say — to velox at all.
+func TestBindAllAcceptsTheLockerItWasGiven(t *testing.T) {
+	pusher := &mockPusher{}
+	locker := &mockLocker{}
+	type Root struct {
+		Locker sync.Locker
+		Items  *velox.VMap[string, int]
+	}
+	r := &Root{Locker: locker, Items: &velox.VMap[string, int]{}}
+	defer func() {
+		if v := recover(); v != nil {
+			t.Fatalf("binding a state that names its own locker panicked: %v", v)
+		}
+	}()
+	velox.BindAll(r, locker, pusher)
+	r.Items.Set("k", 1)
+	if locker.lockCount.Load() < 1 {
+		t.Errorf("after Set, lock count = %d, want >= 1", locker.lockCount.Load())
+	}
+}
+
+// ...but only that one. A second lock in the state is still the conflict the
+// guard was written for.
+func TestBindAllStillPanicsOnALockerItWasNotGiven(t *testing.T) {
+	type Root struct {
+		Locker sync.Locker
+		Other  sync.Locker
+	}
+	r := &Root{Locker: &mockLocker{}, Other: &mockLocker{}}
+	defer func() {
+		v := recover()
+		if v == nil {
+			t.Fatal("a second locker in the state must still panic")
+		}
+		if !strings.Contains(v.(string), "implements sync.Locker") {
+			t.Errorf("unexpected panic: %v", v)
+		}
+	}()
+	velox.BindAll(r, r.Locker, &mockPusher{})
+}
