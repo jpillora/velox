@@ -113,9 +113,16 @@ func (es *eventSourceTransport) send(upd *Update) error {
 	select {
 	case <-time.After(es.writeTimeout):
 		es.writerAbandoned = true
+		// leave the deadline in place — it is what will release the abandoned
+		// writer, and no further send can reuse this transport anyway
 		// don't return buf to pool; goroutine may still be writing
 		return errors.New("timeout")
 	case err := <-sent:
+		// clear it again while the stream is idle. HTTP/2 does not treat a
+		// deadline the way a net.Conn does: it arms a timer that RSTs the
+		// stream when it fires, write in flight or not, so an idle stream with
+		// a shorter WriteTimeout than PingInterval would be killed mid-life.
+		es.clearWriteDeadline()
 		encodePool.Put(buf)
 		return err
 	}
@@ -124,6 +131,14 @@ func (es *eventSourceTransport) send(upd *Update) error {
 func (es *eventSourceTransport) wait() error {
 	<-es.connected
 	return nil
+}
+
+// clearWriteDeadline lifts the bound set for a completed write, so the deadline
+// only ever covers a write actually in flight.
+func (es *eventSourceTransport) clearWriteDeadline() {
+	if es.rc != nil {
+		es.rc.SetWriteDeadline(time.Time{})
+	}
 }
 
 // drain blocks until no writer goroutine is using the http.ResponseWriter, then

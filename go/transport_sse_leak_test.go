@@ -467,8 +467,8 @@ func TestSSESendSetsWriteDeadline(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 	set := w.written()
-	if len(set) != 1 {
-		t.Fatalf("write deadlines set = %d, want 1", len(set))
+	if len(set) == 0 {
+		t.Fatal("no write deadline was set")
 	}
 	if d := set[0].Sub(started); d < 200*time.Millisecond || d > 2*time.Second {
 		t.Fatalf("deadline %s away, want ~%s", d, es.writeTimeout)
@@ -487,4 +487,63 @@ func TestGzipResponseWriterUnwrapsForResponseController(t *testing.T) {
 	if n := len(w.written()); n != 1 {
 		t.Fatalf("deadlines set = %d, want 1", n)
 	}
+}
+
+// the deadline must cover the write and nothing else. HTTP/2 arms a timer that
+// resets the stream when a deadline fires, in flight or not, so leaving one set
+// across an idle stream kills a healthy connection whenever WriteTimeout is
+// shorter than PingInterval.
+func TestSSEWriteDeadlineIsClearedBetweenSends(t *testing.T) {
+	w := &deadlineWriter{switchWriter: newSwitchWriter()}
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/sync", nil)
+	es := &eventSourceTransport{writeTimeout: 20 * time.Millisecond}
+	if err := es.connect(w, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := es.send(&Update{Ping: true}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	set := w.written()
+	if len(set) != 2 {
+		t.Fatalf("deadline calls = %d, want 2 (arm then clear)", len(set))
+	}
+	if set[0].IsZero() {
+		t.Fatal("first call did not arm a deadline")
+	}
+	if !set[1].IsZero() {
+		t.Fatalf("deadline left at %s after a successful write, want cleared", set[1])
+	}
+
+	//idling past writeTimeout must not poison the next send
+	time.Sleep(2 * es.writeTimeout)
+	if err := es.send(&Update{Ping: true}); err != nil {
+		t.Fatalf("send after idling past writeTimeout: %v", err)
+	}
+	if set := w.written(); len(set) != 4 || set[2].IsZero() || !set[3].IsZero() {
+		t.Fatalf("second send did not re-arm then clear: %v", set)
+	}
+}
+
+// the timeout path is the opposite: the deadline is the only thing that will
+// release the abandoned writer, so it must survive
+func TestSSEWriteDeadlineSurvivesATimedOutWrite(t *testing.T) {
+	w := &deadlineWriter{switchWriter: newSwitchWriter()}
+	w.block()
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/sync", nil)
+	es := &eventSourceTransport{writeTimeout: 10 * time.Millisecond}
+	if err := es.connect(w, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := es.send(&Update{Ping: true}); err == nil || err.Error() != "timeout" {
+		t.Fatalf("send error = %v, want timeout", err)
+	}
+	set := w.written()
+	if len(set) != 1 {
+		t.Fatalf("deadline calls = %d, want 1 (armed, never cleared)", len(set))
+	}
+	if set[0].IsZero() {
+		t.Fatal("timed-out write left no deadline to release it")
+	}
+	w.release()
+	es.drain()
 }
