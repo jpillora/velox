@@ -55,6 +55,11 @@ func (ws *websocketsTransport) wait() error {
 		}
 	}
 }
+
+// drain is a no-op: the upgrade hands this transport its own net.Conn, so it
+// never touches the http.ResponseWriter after connect returns.
+func (ws *websocketsTransport) drain() {}
+
 func (ws *websocketsTransport) close() error {
 	return ws.conn.Close()
 }

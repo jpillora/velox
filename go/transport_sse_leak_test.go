@@ -4,11 +4,13 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -20,10 +22,13 @@ type gateWriter struct {
 }
 
 type switchWriter struct {
-	mut     sync.Mutex
-	h       http.Header
-	gate    chan struct{}
-	blocked bool
+	mut      sync.Mutex
+	h        http.Header
+	gate     chan struct{}
+	blocked  bool
+	code     int
+	returned bool
+	misuse   int
 }
 
 func newSwitchWriter() *switchWriter {
@@ -31,8 +36,13 @@ func newSwitchWriter() *switchWriter {
 }
 
 func (w *switchWriter) Header() http.Header { return w.h }
-func (w *switchWriter) WriteHeader(int)     {}
-func (w *switchWriter) Flush()              {}
+func (w *switchWriter) WriteHeader(c int) {
+	w.mut.Lock()
+	w.code = c
+	w.mut.Unlock()
+	w.touch()
+}
+func (w *switchWriter) Flush() { w.touch() }
 func (w *switchWriter) Write(p []byte) (int, error) {
 	w.mut.Lock()
 	blocked := w.blocked
@@ -41,7 +51,37 @@ func (w *switchWriter) Write(p []byte) (int, error) {
 	if blocked {
 		<-gate
 	}
+	w.touch()
 	return len(p), nil
+}
+
+// handlerReturned marks the point net/http reclaims the connection's buffers.
+// Every use of this writer after it is the bug that panics a real server on a
+// nil *bufio.Writer.
+func (w *switchWriter) handlerReturned() {
+	w.mut.Lock()
+	w.returned = true
+	w.mut.Unlock()
+}
+
+func (w *switchWriter) touch() {
+	w.mut.Lock()
+	defer w.mut.Unlock()
+	if w.returned {
+		w.misuse++
+	}
+}
+
+func (w *switchWriter) misuses() int {
+	w.mut.Lock()
+	defer w.mut.Unlock()
+	return w.misuse
+}
+
+func (w *switchWriter) status() int {
+	w.mut.Lock()
+	defer w.mut.Unlock()
+	return w.code
 }
 func (w *switchWriter) block() {
 	w.mut.Lock()
@@ -56,6 +96,27 @@ func (w *switchWriter) release() {
 		close(w.gate)
 	}
 	w.mut.Unlock()
+}
+
+// deadlineWriter is a switchWriter that also carries net/http's optional
+// deadline control, the way *http.response does
+type deadlineWriter struct {
+	*switchWriter
+	dmut      sync.Mutex
+	deadlines []time.Time
+}
+
+func (w *deadlineWriter) SetWriteDeadline(t time.Time) error {
+	w.dmut.Lock()
+	w.deadlines = append(w.deadlines, t)
+	w.dmut.Unlock()
+	return nil
+}
+
+func (w *deadlineWriter) written() []time.Time {
+	w.dmut.Lock()
+	defer w.dmut.Unlock()
+	return append([]time.Time(nil), w.deadlines...)
 }
 
 func (g *gateWriter) Header() http.Header { return g.h }
@@ -182,7 +243,10 @@ func TestSSEInvalidRefreshAndRequestCancelFullyUnwind(t *testing.T) {
 	}
 }
 
-func TestSSEGzipTimedOutWriterIsAbandonedNotReused(t *testing.T) {
+// a timed-out writer goroutine keeps compressing into gzw after send() gives up
+// on it, so close() must leave it attached and drain() — which the HTTP handler
+// blocks on — is what releases it
+func TestSSEGzipTimedOutWriterIsReleasedOnlyByDrain(t *testing.T) {
 	w := newSwitchWriter()
 	w.block()
 	req := httptest.NewRequest(http.MethodGet, "http://example.test/sync", nil)
@@ -210,16 +274,38 @@ func TestSSEGzipTimedOutWriterIsAbandonedNotReused(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
 		t.Fatalf("close took %s after send timeout", elapsed)
 	}
-	if !es.writerAbandoned || es.gzw != nil || es.w != nil {
-		t.Fatalf("gzip was not safely detached: abandoned=%v gzw=%p w=%T", es.writerAbandoned, es.gzw, es.w)
+	if !es.writerAbandoned || es.w != nil {
+		t.Fatalf("timed-out writer was not detached: abandoned=%v w=%T", es.writerAbandoned, es.w)
+	}
+	if es.gzw == nil {
+		t.Fatal("close released the compressor while a writer was still using it")
 	}
 	candidate := gzipWriterPool.Get().(*gzip.Writer)
 	if candidate == gz {
-		t.Fatal("abandoned compressor was returned to the pool")
+		t.Fatal("in-use compressor was returned to the pool")
 	}
 	gzipWriterPool.Put(candidate)
 
+	drained := make(chan struct{})
+	go func() {
+		es.drain()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+		t.Fatal("drain returned while the writer still held the ResponseWriter")
+	case <-time.After(50 * time.Millisecond):
+	}
+
 	w.release()
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("drain did not return once the writer completed")
+	}
+	if es.gzw != nil {
+		t.Fatal("drain did not release the compressor")
+	}
 	deadline := time.Now().Add(time.Second)
 	for countSendGoroutines() != 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -262,7 +348,10 @@ func TestSSEGzipRefreshErrorCloseDoesNotWriteFooter(t *testing.T) {
 	}
 }
 
-func TestSSEGzipInitialPingTimeoutDoesNotAppendHTTPError(t *testing.T) {
+// nothing calls conn.Wait() when the initial ping times out, so connect() has
+// to drain there: the handler must still outlive the writer, and must not try
+// to append an HTTP error to a response the transport already committed
+func TestSSEGzipInitialPingTimeoutHoldsHandlerUntilWriterCompletes(t *testing.T) {
 	w := newSwitchWriter()
 	w.block()
 	es := &eventSourceTransport{writeTimeout: 5 * time.Millisecond}
@@ -275,27 +364,127 @@ func TestSSEGzipInitialPingTimeoutDoesNotAppendHTTPError(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		s.ServeHTTP(w, req)
+		w.handlerReturned()
 		close(done)
 	}()
 
 	select {
 	case <-done:
+		t.Fatal("ServeHTTP returned while the timed-out writer still held the ResponseWriter")
 	case <-time.After(100 * time.Millisecond):
-		w.release()
-		t.Fatal("initial ping timeout attempted blocking HTTP error output")
 	}
 	if es.IsConnected() {
 		t.Fatal("SSE transport remained connected after initial ping timeout")
 	}
-	if !es.writerAbandoned || es.gzw != nil || es.w != nil {
-		t.Fatalf("timed-out initial ping was not detached: abandoned=%v gzw=%p w=%T", es.writerAbandoned, es.gzw, es.w)
+	if !es.writerAbandoned || es.w != nil {
+		t.Fatalf("timed-out initial ping was not detached: abandoned=%v w=%T", es.writerAbandoned, es.w)
 	}
+
 	w.release()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeHTTP did not unwind once the writer completed")
+	}
+	if code := w.status(); code != 0 {
+		t.Fatalf("initial ping timeout wrote HTTP status %d over the committed response", code)
+	}
+	if n := w.misuses(); n != 0 {
+		t.Fatalf("ResponseWriter used %d times after ServeHTTP returned", n)
+	}
 	deadline := time.Now().Add(time.Second)
 	for countSendGoroutines() != before && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	if got := countSendGoroutines(); got != before {
 		t.Fatalf("send goroutines = %d, want baseline %d", got, before)
+	}
+}
+
+// the incident this guards: a push whose write stalls past writeTimeout is
+// abandoned by send(), conn.Push() closes the connection, and the handler
+// returns — net/http then reclaims the connection's buffers while the abandoned
+// goroutine is still inside Write/Flush, and the process dies on a nil
+// *bufio.Writer somewhere under chunkWriter.flush
+func TestSSEStalledPushDoesNotOutliveTheHandler(t *testing.T) {
+	w := newSwitchWriter()
+	var value atomic.Int64
+	s := New(func() (json.RawMessage, error) {
+		return json.RawMessage(fmt.Sprintf(`{"value":%d}`, value.Load())), nil
+	})
+	s.WriteTimeout = 20 * time.Millisecond
+	s.Throttle = MinThrottle
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/sync", nil)
+	req.Header.Set("Accept", "text/event-stream")
+	done := make(chan struct{})
+	go func() {
+		s.ServeHTTP(w, req)
+		w.handlerReturned()
+		close(done)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for s.NumConnections() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if s.NumConnections() != 1 {
+		t.Fatal("client never connected")
+	}
+
+	//stall the client mid-stream, then push a new version at it
+	w.block()
+	value.Add(1)
+	s.Push()
+
+	select {
+	case <-done:
+		t.Fatal("handler returned while the stalled writer still held the ResponseWriter")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	w.release()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not unwind once the writer completed")
+	}
+	if n := w.misuses(); n != 0 {
+		t.Fatalf("ResponseWriter used %d times after ServeHTTP returned", n)
+	}
+}
+
+// every send must put a real deadline on the connection. without one an
+// abandoned writer is only released when the client's TCP session dies, and
+// drain — so the HTTP handler — waits exactly that long.
+func TestSSESendSetsWriteDeadline(t *testing.T) {
+	w := &deadlineWriter{switchWriter: newSwitchWriter()}
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/sync", nil)
+	es := &eventSourceTransport{writeTimeout: 250 * time.Millisecond}
+	if err := es.connect(w, req); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if err := es.send(&Update{Ping: true}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	set := w.written()
+	if len(set) != 1 {
+		t.Fatalf("write deadlines set = %d, want 1", len(set))
+	}
+	if d := set[0].Sub(started); d < 200*time.Millisecond || d > 2*time.Second {
+		t.Fatalf("deadline %s away, want ~%s", d, es.writeTimeout)
+	}
+}
+
+// http.ResponseController only reaches the connection through wrappers that
+// implement Unwrap — ours must, or a caller wrapping us silently loses
+// deadline control
+func TestGzipResponseWriterUnwrapsForResponseController(t *testing.T) {
+	w := &deadlineWriter{switchWriter: newSwitchWriter()}
+	gzw := &gzipResponseWriter{ResponseWriter: w}
+	if err := http.NewResponseController(gzw).SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("SetWriteDeadline through the gzip wrapper: %v", err)
+	}
+	if n := len(w.written()); n != 1 {
+		t.Fatalf("deadlines set = %d, want 1", n)
 	}
 }

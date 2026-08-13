@@ -1389,6 +1389,7 @@ type recordingTransport struct {
 
 func (r *recordingTransport) connect(http.ResponseWriter, *http.Request) error { return nil }
 func (r *recordingTransport) wait() error                                      { return nil }
+func (r *recordingTransport) drain()                                           {}
 func (r *recordingTransport) close() error                                     { return nil }
 func (r *recordingTransport) send(update *Update) error {
 	copy := *update
@@ -1433,6 +1434,7 @@ func (c *controlledTransport) wait() error {
 	<-c.closed
 	return nil
 }
+func (c *controlledTransport) drain() {}
 func (c *controlledTransport) close() error {
 	c.closeCalls.Add(1)
 	c.closeOnce.Do(func() { close(c.closed) })

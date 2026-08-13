@@ -29,11 +29,21 @@ func (g *gzipResponseWriter) Write(p []byte) (int, error) {
 	return g.gz.Write(p)
 }
 
+// Unwrap exposes the wrapped writer to http.ResponseController, so deadlines
+// and other connection controls reach net/http through this layer.
+func (g *gzipResponseWriter) Unwrap() http.ResponseWriter {
+	return g.ResponseWriter
+}
+
 // Flush flushes the gzip compressor and then the underlying transport.
 // Without this, compressed bytes would be buffered and SSE events would
 // not be delivered in real-time.
 func (g *gzipResponseWriter) Flush() {
-	g.gz.Flush()
+	if err := g.gz.Flush(); err != nil {
+		//the compressor could not reach the transport, so there is nothing to
+		//push through it — and it may already be tearing down
+		return
+	}
 	if g.flusher != nil {
 		g.flusher.Flush()
 	}

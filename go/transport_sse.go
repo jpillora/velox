@@ -21,13 +21,17 @@ type eventSourceTransport struct {
 	mut             sync.Mutex
 	writeTimeout    time.Duration
 	w               http.ResponseWriter
-	gzw             *gzipResponseWriter // non-nil if gzip is active
-	writerAbandoned bool                // a timed-out child may still be using w
+	rc              *http.ResponseController // write deadlines on the raw writer
+	gzw             *gzipResponseWriter      // non-nil if gzip is active
+	writers         sync.WaitGroup           // writer goroutines still holding w
+	writerAbandoned bool                     // a timed-out child may still be using w
 	isConnected     bool
 	connected       chan struct{}
 }
 
 func (es *eventSourceTransport) connect(w http.ResponseWriter, r *http.Request) error {
+	//deadlines must be set on the writer net/http handed us, not on a wrapper
+	es.rc = http.NewResponseController(w)
 	//eventsource headers
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Vary", "Accept")
@@ -86,17 +90,25 @@ func (es *eventSourceTransport) send(upd *Update) error {
 	if len(b) > 0 && b[len(b)-1] == '\n' {
 		b = b[:len(b)-1]
 	}
-	// TODO: improve this to not use a goroutine
-	// instead it should hijack and use a tcp write-timeout
-	// buffered so an abandoned (timed-out) writer goroutine can
-	// deposit its result and exit instead of blocking forever
+	// bound the write where the ResponseWriter chain exposes the connection.
+	// net/http does; wrappers only do if they implement Unwrap. without a
+	// deadline a stalled client holds the writer until it disconnects, and
+	// drain — so the HTTP handler — waits exactly that long.
+	if es.rc != nil {
+		es.rc.SetWriteDeadline(time.Now().Add(es.writeTimeout))
+	}
+	// the write gets its own goroutine so a stalled client cannot block the
+	// pusher. past the timeout that goroutine still holds writer, so drain
+	// keeps the handler open until it lets go — touching a ResponseWriter
+	// after ServeHTTP returns dereferences a freed *bufio.Writer.
 	sent := make(chan error, 1)
+	es.writers.Add(1)
 	go func() {
-		err := eventsource.WriteEvent(writer, eventsource.Event{
+		defer es.writers.Done()
+		sent <- eventsource.WriteEvent(writer, eventsource.Event{
 			ID:   strconv.FormatInt(upd.Version, 10),
 			Data: b,
 		})
-		sent <- err
 	}()
 	select {
 	case <-time.After(es.writeTimeout):
@@ -114,6 +126,21 @@ func (es *eventSourceTransport) wait() error {
 	return nil
 }
 
+// drain blocks until no writer goroutine is using the http.ResponseWriter, then
+// releases the gzip writer now that nothing can still be compressing into it.
+// The HTTP handler must not return before this completes: net/http reclaims the
+// connection's buffers once ServeHTTP returns, so a late write or flush panics
+// on a nil *bufio.Writer and takes the process down with it.
+func (es *eventSourceTransport) drain() {
+	es.writers.Wait()
+	es.mut.Lock()
+	defer es.mut.Unlock()
+	if es.gzw != nil {
+		es.gzw.abort()
+		es.gzw = nil
+	}
+}
+
 func (es *eventSourceTransport) IsConnected() bool {
 	es.mut.Lock()
 	defer es.mut.Unlock()
@@ -127,13 +154,9 @@ func (es *eventSourceTransport) close() error {
 		return nil
 	}
 	es.isConnected = false
-	if es.gzw != nil {
-		if !es.writerAbandoned {
-			es.gzw.abort()
-		}
-		es.gzw = nil
-	}
 	es.w = nil
+	//the gzip writer is released by drain instead, once no writer goroutine
+	//can still be compressing into it
 	//unblocking the wait causes the HTTP handler to return
 	close(es.connected)
 	return nil

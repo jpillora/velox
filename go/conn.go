@@ -63,9 +63,11 @@ func (c *conn) Version() int64 {
 	return c.version
 }
 
-// Wait will block until the connection is closed.
+// Wait will block until the connection is closed and nothing is still writing
+// to it. The HTTP handler must not return until this returns.
 func (c *conn) Wait() {
 	c.waiter.Wait()
+	c.transport.drain()
 }
 
 // Force close the connection.
@@ -93,6 +95,8 @@ func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 	//initial ping
 	if err := c.send(&Update{Ping: true}); err != nil {
 		c.transport.close()
+		//nobody reaches conn.Wait() on this path, so drain here instead
+		c.transport.drain()
 		return &responseCommittedError{err: fmt.Errorf("failed to send initial event: %w", err)}
 	}
 	//successfully connected

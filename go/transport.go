@@ -18,5 +18,9 @@ type transport interface {
 	connect(w http.ResponseWriter, r *http.Request) error
 	send(upd *Update) error
 	wait() error
+	//drain blocks until nothing is still writing to the http.ResponseWriter,
+	//so callers can let ServeHTTP return without net/http pulling the
+	//connection out from under an in-flight write
+	drain()
 	close() error
 }
