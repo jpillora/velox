@@ -34,9 +34,23 @@ const (
 type mnode struct {
 	hash [16]byte
 	kind mkind
+	// size approximates this subtree's encoded length. It is what lets the
+	// differ notice that the operations describing a change have grown larger
+	// than the thing they describe, and send the subtree instead. Object keys
+	// are measured unescaped, so it is an estimate, which is all a
+	// send-the-smaller decision needs.
+	size int
 	raw  []byte   // leaf only: owned copy of the encoded value
 	keys []string // object only, sorted so key order cannot affect the hash
 	kids []*mnode // object and array only
+}
+
+// separators counts the commas joining n children.
+func separators(n int) int {
+	if n <= 1 {
+		return 0
+	}
+	return n - 1
 }
 
 func (n *mnode) kidByKey(key string) *mnode {
@@ -222,7 +236,7 @@ func (b *merkleBuilder) buildLeaf(prev *mnode, newRaw json.RawMessage) (*mnode, 
 			return prev, nil
 		}
 	}
-	node := &mnode{kind: kindLeaf, raw: bytes.Clone(newRaw)}
+	node := &mnode{kind: kindLeaf, raw: bytes.Clone(newRaw), size: len(newRaw)}
 	node.rehash()
 	b.created++
 	return node, nil
@@ -242,6 +256,7 @@ func (b *merkleBuilder) buildObject(prev *mnode, prevRaw, newRaw json.RawMessage
 	}
 
 	node := &mnode{kind: kindObject, keys: level.keys, kids: make([]*mnode, len(level.keys))}
+	node.size = len("{}") + separators(len(level.keys))
 	shared := prevIsObject && len(prev.keys) == len(level.keys)
 	for i, key := range level.keys {
 		var prevKidRaw json.RawMessage
@@ -253,6 +268,7 @@ func (b *merkleBuilder) buildObject(prev *mnode, prevRaw, newRaw json.RawMessage
 			return nil, err
 		}
 		node.kids[i] = kid
+		node.size += len(key) + len(`"":`) + kid.size
 		if shared && (prev.keys[i] != key || prev.kids[i] != kid) {
 			shared = false
 		}
@@ -279,6 +295,7 @@ func (b *merkleBuilder) buildArray(prev *mnode, prevRaw, newRaw json.RawMessage)
 	}
 
 	node := &mnode{kind: kindArray, kids: make([]*mnode, len(elements))}
+	node.size = len("[]") + separators(len(elements))
 	shared := prevIsArray && len(prev.kids) == len(elements)
 	for i, element := range elements {
 		var prevKid *mnode
@@ -294,6 +311,7 @@ func (b *merkleBuilder) buildArray(prev *mnode, prevRaw, newRaw json.RawMessage)
 			return nil, err
 		}
 		node.kids[i] = kid
+		node.size += kid.size
 		if shared && prev.kids[i] != kid {
 			shared = false
 		}

@@ -99,12 +99,34 @@ function diff(a, b) {
   return ops;
 }
 
+//collapse replaces the operations emitted for one subtree with a single
+//assignment of it, whenever describing the change has grown more expensive than
+//sending the thing itself. Inserting at the head of a long array shifts every
+//element, so without this the differ would emit one assignment per element —
+//more bytes than the array. Applying the rule at every node bounds the worst
+//case at no worse than the whole-subtree replacement v2 would have sent.
+//
+//The root is exempt: an assignment there would have an empty path, and no
+//applier can replace the document it was handed.
+function collapse(a, b, path, ops, savepoint) {
+  if (path.length === 0 || ops.length === savepoint) return;
+  let emitted = 0;
+  for (let i = savepoint; i < ops.length; i++) {
+    emitted += JSON.stringify(ops[i]).length;
+  }
+  //raw is this subtree's exact encoding, so the comparison is exact
+  if (emitted <= b.raw.length) return;
+  ops.length = savepoint;
+  ops.push(["s", path.slice(), JSON.parse(b.raw)]);
+}
+
 function walk(a, b, path, ops) {
   if (a === b || a.hash === b.hash) return;
   if (a.kind !== b.kind || a.kind === LEAF) {
     ops.push(["s", path.slice(), JSON.parse(b.raw)]);
     return;
   }
+  const savepoint = ops.length;
   if (a.kind === OBJECT) {
     for (const key of a.keys) {
       if (!(key in b.byKey)) {
@@ -122,6 +144,7 @@ function walk(a, b, path, ops) {
       }
       path.pop();
     }
+    collapse(a, b, path, ops, savepoint);
     return;
   }
   if (b.kids.length < a.kids.length) {
@@ -136,6 +159,7 @@ function walk(a, b, path, ops) {
     }
     path.pop();
   }
+  collapse(a, b, path, ops, savepoint);
 }
 
 module.exports = {build, buildRoot, diff, LEAF, OBJECT, ARRAY};

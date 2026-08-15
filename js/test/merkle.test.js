@@ -67,6 +67,38 @@ for (const leafSize of [1, 512]) {
   console.log("  ok   structural sharing");
 }
 
+//Positional operations' worst case: a prepend shifts every element, so a naive
+//differ emits one assignment per element. The differ must send the array
+//instead, bounding v3 at no worse than a whole-array replacement.
+{
+  const elements = [];
+  for (let i = 0; i < 200; i++) elements.push(i);
+  const before = {log: elements.slice()};
+  const after = {log: [999].concat(elements)};
+  const stats = {created: 0};
+  const first = merkle.buildRoot(null, before, 1, stats);
+  const second = merkle.buildRoot(first, after, 1, stats);
+  const ops = merkle.diff(first, second);
+  assert.strictEqual(ops.length, 1, "a prepend produced " + ops.length + " operations");
+  assert.strictEqual(ops[0][0], "s");
+  assert.deepStrictEqual(ops[0][1], ["log"], "collapse did not target the array");
+  const target = JSON.parse(JSON.stringify(before));
+  applyOps(target, ops);
+  assert.deepStrictEqual(target, after);
+  console.log("  ok   collapses operations that outweigh their subtree");
+}
+
+//The root must never collapse: the operation would have an empty path.
+{
+  const stats = {created: 0};
+  const first = merkle.buildRoot(null, {a: 1, b: 2}, 1, stats);
+  const second = merkle.buildRoot(first, {a: "y".repeat(200), b: 2}, 1, stats);
+  for (const op of merkle.diff(first, second)) {
+    assert.notStrictEqual(op[1].length, 0, "the root was collapsed into " + JSON.stringify(op));
+  }
+  console.log("  ok   never collapses the root");
+}
+
 //Key order must not affect the hash, since it does not affect the value.
 {
   const stats = {created: 0};

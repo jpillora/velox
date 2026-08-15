@@ -166,6 +166,55 @@ func (d *differ) emitReplacement(a, b *mnode) error {
 func (d *differ) push(elem any) { d.path = append(d.path, elem) }
 func (d *differ) pop()          { d.path = d.path[:len(d.path)-1] }
 
+// size approximates the operation's encoded length, which is all the
+// send-the-smaller decision needs.
+func (o op) size() int {
+	total := len(`["s",[]]`) + separators(len(o.path))
+	for _, elem := range o.path {
+		switch value := elem.(type) {
+		case string:
+			total += len(value) + len(`""`)
+		default:
+			total += len("999")
+		}
+	}
+	switch o.kind {
+	case opSet:
+		total += len(",") + len(o.value)
+	case opLen:
+		total += len(",999")
+	}
+	return total
+}
+
+// collapse replaces the operations emitted for one subtree with a single
+// assignment of the whole subtree, whenever describing the change has grown
+// more expensive than sending the thing itself.
+//
+// Without this, positional array operations degrade badly on the cases they
+// look worst for: inserting at the head of a 200-element array shifts every
+// element, so the differ would emit 200 assignments with repeated paths — worse
+// than the whole-array replacement v2 would have sent. Applying the rule at
+// every node generalises "send whichever is smaller" from the message down to
+// each subtree, and bounds the worst case at no worse than v2.
+//
+// The root is exempt: an assignment there would have an empty path, and no
+// applier can replace the document it was handed.
+func (d *differ) collapse(savepoint int, node *mnode) {
+	if !d.arrayOps || len(d.path) == 0 || len(d.ops) == savepoint {
+		return
+	}
+	emitted := 0
+	for _, o := range d.ops[savepoint:] {
+		emitted += o.size()
+	}
+	if emitted <= node.size {
+		return
+	}
+	d.ops = d.ops[:savepoint]
+	d.emitSet(node)
+}
+
 // diffTrees returns the operations turning tree a into tree b. A nil root is a
 // null state, which holds no keys; going from one to the other is expressed as
 // adding or removing every top-level key rather than as a root replacement.
@@ -227,6 +276,7 @@ func (d *differ) walk(a, b *mnode) error {
 }
 
 func (d *differ) walkObject(a, b *mnode) error {
+	savepoint := len(d.ops)
 	for _, key := range a.keys {
 		if b.kidByKey(key) == nil {
 			d.push(key)
@@ -245,6 +295,7 @@ func (d *differ) walkObject(a, b *mnode) error {
 		}
 		d.pop()
 	}
+	d.collapse(savepoint, b)
 	return nil
 }
 
@@ -272,7 +323,9 @@ func (d *differ) walkArray(a, b *mnode) error {
 	if !d.arrayOps && (len(d.ops) > savepoint || len(a.kids) != len(b.kids)) {
 		d.ops = d.ops[:savepoint]
 		d.emitSet(b)
+		return nil
 	}
+	d.collapse(savepoint, b)
 	return nil
 }
 

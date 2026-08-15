@@ -3,6 +3,7 @@ package velox
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -102,22 +103,26 @@ func TestV3ArrayOperationsAddressElements(t *testing.T) {
 		wantKinds  []string
 		wantAppend bool
 	}{
+		// Elements are padded so that addressing one really is cheaper than
+		// resending the array; on a tiny array it is not, and the differ is
+		// expected to notice that — see
+		// TestV3CollapsesOperationsThatOutweighTheSubtree.
 		{
 			name:      "element changed",
-			before:    `{"log":[{"m":"a"},{"m":"b"},{"m":"c"}]}`,
-			after:     `{"log":[{"m":"a"},{"m":"B"},{"m":"c"}]}`,
+			before:    `{"log":[{"m":"` + pad("a") + `"},{"m":"` + pad("b") + `"},{"m":"` + pad("c") + `"}]}`,
+			after:     `{"log":[{"m":"` + pad("a") + `"},{"m":"` + pad("B") + `"},{"m":"` + pad("c") + `"}]}`,
 			wantKinds: []string{opSet},
 		},
 		{
 			name:      "array shrunk",
-			before:    `{"log":[1,2,3,4]}`,
-			after:     `{"log":[1,2]}`,
+			before:    `{"log":["` + pad("a") + `","` + pad("b") + `","` + pad("c") + `","` + pad("d") + `"]}`,
+			after:     `{"log":["` + pad("a") + `","` + pad("b") + `"]}`,
 			wantKinds: []string{opLen},
 		},
 		{
 			name:       "array grown",
-			before:     `{"log":[1,2]}`,
-			after:      `{"log":[1,2,3,4]}`,
+			before:     `{"log":["` + pad("a") + `","` + pad("b") + `"]}`,
+			after:      `{"log":["` + pad("a") + `","` + pad("b") + `","` + pad("c") + `","` + pad("d") + `"]}`,
 			wantKinds:  []string{opSet, opSet},
 			wantAppend: true,
 		},
@@ -148,6 +153,78 @@ func TestV3ArrayOperationsAddressElements(t *testing.T) {
 			}
 			assertOpsRoundTrip(t, tt.before, tt.after, ops)
 		})
+	}
+}
+
+// pad grows a marker into an element big enough that addressing it costs less
+// than resending the array it sits in.
+func pad(marker string) string {
+	return marker + strings.Repeat("x", 60)
+}
+
+// TestV3CollapsesOperationsThatOutweighTheSubtree covers positional operations'
+// worst case. Inserting at the head of an array shifts every element, so a naive
+// differ emits one assignment per element — more bytes than the whole array. The
+// differ must notice and send the array instead, which bounds v3 at no worse
+// than v2 rather than dramatically worse.
+func TestV3CollapsesOperationsThatOutweighTheSubtree(t *testing.T) {
+	elements := make([]string, 200)
+	for i := range elements {
+		elements[i] = strconv.Itoa(i)
+	}
+	before := `{"log":[` + strings.Join(elements, ",") + `]}`
+	after := `{"log":[999,` + strings.Join(elements, ",") + `]}`
+
+	patcher := &mergePatcher{leafSize: 1}
+	if _, err := patcher.patch([]byte(before)); err != nil {
+		t.Fatal(err)
+	}
+	_, ops, err := patcher.update([]byte(after), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("a prepend produced %d operations, want the array sent once", len(ops))
+	}
+	if ops[0].kind != opSet || len(ops[0].path) != 1 {
+		t.Fatalf("collapse emitted %v, want a single assignment of the array", ops[0])
+	}
+	encoded, err := json.Marshal(ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertOpsRoundTrip(t, before, after, ops)
+
+	// The guarantee is that v3 is never dramatically worse than v2 on this
+	// shape, so compare against what v2 would have sent for the same change.
+	// A small envelope difference is expected; a per-element blowup is not.
+	legacy := &mergePatcher{leafSize: 1}
+	if _, err := legacy.patch([]byte(before)); err != nil {
+		t.Fatal(err)
+	}
+	v2delta, err := legacy.patch([]byte(after))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) > len(v2delta)+64 {
+		t.Fatalf("v3 patch is %d bytes against v2's %d; the collapse did not bound the worst case", len(encoded), len(v2delta))
+	}
+
+	// The root itself must never collapse: the operation would have an empty
+	// path, and no applier can replace the document it was handed.
+	wholesale := `{"a":"` + strings.Repeat("y", 200) + `","b":2}`
+	rootPatcher := &mergePatcher{leafSize: 1}
+	if _, err := rootPatcher.patch([]byte(`{"a":1,"b":2}`)); err != nil {
+		t.Fatal(err)
+	}
+	_, rootOps, err := rootPatcher.update([]byte(wholesale), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range rootOps {
+		if len(o.path) == 0 {
+			t.Fatalf("the root was collapsed into %v", o)
+		}
 	}
 }
 
