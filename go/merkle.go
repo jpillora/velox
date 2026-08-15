@@ -181,6 +181,10 @@ func scanArrayLevel(data []byte) ([]json.RawMessage, error) {
 			return nil, errors.New("invalid JSON array")
 		}
 		end := scanJSONValue(data, i)
+		// As in rawObject: an empty span is a missing element, not a value.
+		if end == i {
+			return nil, errors.New("invalid JSON array")
+		}
 		elements = append(elements, data[i:end])
 		i = skipJSONSpace(data, end)
 		if i < len(data) && data[i] == ']' {

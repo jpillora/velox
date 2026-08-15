@@ -119,6 +119,23 @@ func rawObject(data []byte) (rawObjectMap, error) {
 		}
 		valueStart := skipJSONSpace(data, i+1)
 		valueEnd := scanJSONValue(data, valueStart)
+		// An empty span means there was no value at all, as in {"a":,"b":1}.
+		// Nothing downstream would catch it: the span is only validated when it
+		// reaches a leaf, and a later duplicate of the same key overwrites it
+		// first, so the malformed document would be published as if it were
+		// whatever the duplicate said.
+		if valueEnd == valueStart {
+			return nil, errors.New("invalid JSON object")
+		}
+		// Duplicate keys resolve last-wins, matching encoding/json. The value
+		// being dropped still has to be well-formed, though: it is about to
+		// become unreachable, and validation only happens where a span comes to
+		// rest, so {"a":A,"a":0} would otherwise be published as {"a":0}.
+		// Duplicates do not occur in encoding/json's own output, so this costs
+		// nothing on the normal path.
+		if discarded, ok := object[key]; ok && !json.Valid(discarded) {
+			return nil, errors.New("invalid JSON object")
+		}
 		object[key] = data[valueStart:valueEnd]
 		i = skipJSONSpace(data, valueEnd)
 		if i < len(data) && data[i] == '}' {

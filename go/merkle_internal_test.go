@@ -1,6 +1,7 @@
 package velox
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -372,6 +373,93 @@ func FuzzV3RoundTrip(f *testing.F) {
 			if !valueEqual(got, want) {
 				gotBytes, _ := json.Marshal(got)
 				t.Fatalf("leafSize %d: applied ops = %s, want %s (ops %v)", leafSize, gotBytes, after, ops)
+			}
+		}
+	})
+}
+
+// acceptableState is what velox is willing to publish: valid JSON that is
+// either an object or null. It is deliberately expressed with encoding/json
+// rather than with velox's own scanners, so the fuzz test compares the builder
+// against an independent judge.
+func acceptableState(doc []byte) bool {
+	if !json.Valid(doc) {
+		return false
+	}
+	if isJSONNull(doc) {
+		return true
+	}
+	return firstJSONByte(doc) == '{'
+}
+
+// FuzzMalformedState checks that the builder fails closed.
+//
+// Narrowing validation to changed leaves rests on an argument — bytes identical
+// to the previous snapshot were validated when that snapshot was accepted — that
+// only holds if boundary scanning rejects everything encoding/json would. Since
+// json.Valid no longer covers the whole document, the scanners now run before
+// validity is known, and State.Data is a caller-supplied function: a custom
+// MarshalJSON can emit a truncated document, junk between values, or an
+// unterminated string. The failure to avoid is not a crash but a false
+// "unchanged", where malformed bytes are quietly accepted and clients are left
+// holding something the server never meant to send.
+func FuzzMalformedState(f *testing.F) {
+	seeds := [][2]string{
+		{`{"a":1}`, `{"a":`},
+		{`{"a":1}`, `{"a":1`},
+		{`{"a":1}`, `{"a":1}}`},
+		{`{"a":1}`, `{"a":1} junk`},
+		{`{"a":1}`, `{"a":1}{"b":2}`},
+		{`{"a":1}`, `{"a":"unterminated}`},
+		{`{"a":1}`, `{"a":tru}`},
+		{`{"a":1}`, `{"a":01}`},
+		{`{"a":1}`, `{"a":1,}`},
+		{`{"a":1}`, `{,"a":1}`},
+		{`{"a":1}`, `{"a" 1}`},
+		{`{"a":1}`, `{"a":1 "b":2}`},
+		{`{"a":1}`, "{\"a\":1}\x00"},
+		{`{"a":1}`, `{"a":[1,2}`},
+		{`{"a":1}`, `{"a":{"b":}}`},
+		{`{"a":1}`, `nul`},
+		{`{"a":1}`, `[1,2]`},
+		{`{"a":1}`, `"string"`},
+		{`{"a":1}`, `{"a":1e1000}`},
+		{`{"a":1}`, `{"a":1,"a":2}`},
+		{`{"a":{"b":1}}`, `{"a":{"b":1,"c":}}`},
+	}
+	for _, seed := range seeds {
+		f.Add(seed[0], seed[1])
+	}
+
+	f.Fuzz(func(t *testing.T, before, after string) {
+		if !acceptableState([]byte(before)) {
+			t.Skip()
+		}
+		for _, leafSize := range []int{1, 24, 512} {
+			patcher := &mergePatcher{leafSize: leafSize}
+			if _, err := patcher.patch([]byte(before)); err != nil {
+				t.Skipf("leafSize %d rejected a valid seed %q: %v", leafSize, before, err)
+			}
+			cached := patcher.prev
+			tree := patcher.tree
+
+			delta, err := patcher.patch([]byte(after))
+			if err != nil {
+				// A rejected state must leave the patcher exactly as it was, or
+				// the next push diffs against something never published.
+				if !bytes.Equal(patcher.prev, cached) || patcher.tree != tree {
+					t.Fatalf("leafSize %d: rejecting %q disturbed the cache", leafSize, after)
+				}
+				continue
+			}
+			if !acceptableState([]byte(after)) {
+				t.Fatalf("leafSize %d: accepted malformed state %q as %s", leafSize, after, delta)
+			}
+			// Accepted, so the patch must genuinely carry before to after. A null
+			// state is excluded: it clears rather than patches, which refresh
+			// handles separately.
+			if !isJSONNull([]byte(after)) {
+				assertMergePatchResult(t, before, after, delta)
 			}
 		}
 	})
