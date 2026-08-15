@@ -174,6 +174,68 @@ each update.
 | `Batch(func(*[]V))` | |
 | `Clear()` | |
 
+### Protocol
+
+velox speaks two protocols and negotiates between them, so old and new
+client/server pairings keep working in both directions. A client advertises what
+it wants with the `p` query parameter; anything below 3, including its absence,
+is served v2 exactly as before.
+
+**v2** sends either a full snapshot or an RFC 7386 merge patch, and a patch only
+exists for one version hop. A client that lagged, reconnected or reloaded the
+page gets the whole document.
+
+**v3** maintains a merkle tree over the state. Unchanged subtrees are shared
+between versions rather than re-diffed, so recent versions are cheap to retain
+and a patch can be computed between any two of them. Updates carry:
+
+| field | meaning |
+|---|---|
+| `root` | opaque token naming the tree the client holds after applying |
+| `base` | the tree `ops` applies to |
+| `ops` | ordered operation list |
+
+Operations address one child each:
+
+| operation | meaning |
+|---|---|
+| `["s", path, value]` | assign; `path` targets the child |
+| `["d", path]` | delete; `path` targets the child |
+| `["n", path, length]` | truncate; `path` targets the array |
+
+Path elements are strings for object keys and numbers for array indices, so a
+numeric-looking key never collides with an index. Unlike v2, changing one element
+of an array does not resend the array.
+
+Root hashes are **server-internal and opaque**: clients store them and echo them
+back as `h`, and never recompute them. That keeps cross-language JSON
+canonicalisation out of the protocol, and means the Go and Node servers need not
+agree on a hash function.
+
+**Resuming.** A client reconnects with `?p=3&id=…&v=…&h=…`. If the server still
+retains that tree it replies with operations spanning however many versions were
+missed; otherwise it sends a full snapshot. The window is bounded by
+`HistoryWindow` (default 5m) and `HistoryMaxNodes`.
+
+Browser clients can opt into persisting the document, which turns a page reload
+into the same cheap resume:
+
+```js
+velox("/velox", obj, {persist: true}); // or {persist: "my-key", storage: …}
+```
+
+Writes are debounced and a quota failure disables persistence rather than
+breaking the connection. A stale stored version is harmless -- it only widens the
+resume patch.
+
+**Tuning.** `MerkleLeafSize` (default 512) is the subtree size below which the
+tree stores an opaque leaf rather than addressable children: larger values mean a
+smaller tree and coarser patches. `Incremental` additionally lets VMap/VSlice
+reuse their previous encoding when unchanged, so a push re-encodes only what
+moved; it engages only for element types that cannot be mutated through a handed
+-out copy, and `VerifyIncremental` re-marshals on every push to catch a stale
+cache.
+
 ### Notes
 
 - Object synchronization is one way (server to client) only.
