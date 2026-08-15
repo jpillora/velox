@@ -167,7 +167,15 @@ func (c *conn) Push() {
 	//current state data
 	d := &c.state.data
 	d.mut.RLock()
-	if c.Version() == d.version {
+	// v3 asks the root hash as well as the version. They agree in normal
+	// operation, but a client whose stored version survived while its root did
+	// not would otherwise be judged current on the version alone and left
+	// stranded with nothing sent to it.
+	current := c.Version() == d.version
+	if c.proto >= 3 {
+		current = current && c.baseHash == d.rootHash
+	}
+	if current {
 		d.mut.RUnlock()
 		if c.state.Debug {
 			log.Printf("velox: conn[%d] already at version %d, skipping", c.id, d.version)
