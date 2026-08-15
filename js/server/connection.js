@@ -9,6 +9,8 @@ module.exports = class Connection {
     this.id = ++connectionCount;
     this.writes = 0;
     this.version = 0; //copy of client's version
+    this.proto = 0; //protocol the client asked for; below 3 is served v2
+    this.baseHash = ""; //opaque root the client currently holds
     this.connected = false;
     this.state = state;
     this.pushing = false;
@@ -27,9 +29,19 @@ module.exports = class Connection {
       res.status(400).send("Invalid sync request");
       return false;
     }
-    //optionally set specific version
-    if (this.state.id === req.query.id && /^\d+$/.test(req.query.v)) {
-      this.version = parseInt(req.query.v, 10);
+    //optionally set specific version. A mismatched id means a different state
+    //object, so the client's version and resume token are meaningless.
+    if (this.state.id === req.query.id) {
+      if (/^\d+$/.test(req.query.v)) {
+        this.version = parseInt(req.query.v, 10);
+      }
+      if (/^[0-9a-f]+$/.test(req.query.h || "")) {
+        this.baseHash = req.query.h;
+      }
+    }
+    //protocol negotiation: absent or older than 3 is served v2 unchanged
+    if (/^\d+$/.test(req.query.p || "")) {
+      this.proto = Math.min(parseInt(req.query.p, 10), 3);
     }
     this.debug("setup", req.query);
     this.connected = true;
@@ -72,27 +84,48 @@ module.exports = class Connection {
     if (this.writes === 0) {
       id = this.state.id;
     }
-    let delta = undefined;
-    if (
-      this.state.delta &&
-      this.state.delta.length < this.state.json.length &&
-      this.version === this.state.version - 1
-    ) {
-      delta = true;
-    }
+    let payload;
+    if (this.proto >= 3) {
+      //a client whose base is still retained gets operations against it, however
+      //many versions behind it has fallen; anything else takes the document
+      let ops = this.state.opsFor(this.baseHash);
+      let useOps = ops !== null && ops.length < this.state.json.length;
+      let update = {
+        id: id,
+        version: this.state.version,
+        proto: this.writes === 0 ? 3 : undefined,
+        root: this.state.rootHash,
+        base: useOps ? this.baseHash : undefined,
+        ops: null
+      };
+      payload = JSON.stringify(update).replace(
+        /"ops":null\}$/,
+        useOps ? `"ops":${ops}}` : `"body":${this.state.json}}`
+      );
+      this.baseHash = this.state.rootHash;
+    } else {
+      let delta = undefined;
+      if (
+        this.state.delta &&
+        this.state.delta.length < this.state.json.length &&
+        this.version === this.state.version - 1
+      ) {
+        delta = true;
+      }
 
-    let update = {
-      id: id,
-      version: this.state.version,
-      delta: delta,
-      body: null
-    };
-    //string replace to make use of cached json payload
-    let body = delta ? this.state.delta : this.state.json;
-    let payload = JSON.stringify(update).replace(
-      /"body":null\}$/,
-      `"body":${body}}`
-    );
+      let update = {
+        id: id,
+        version: this.state.version,
+        delta: delta,
+        body: null
+      };
+      //string replace to make use of cached json payload
+      let body = delta ? this.state.delta : this.state.json;
+      payload = JSON.stringify(update).replace(
+        /"body":null\}$/,
+        `"body":${body}}`
+      );
+    }
     this.debug("write msg#" + this.writes + " " + payload.length + "bytes");
     //write onto the wire!
     await this.transport.write(payload);

@@ -1,9 +1,15 @@
 const jsonpatch = require("json-merge-patch");
 const merge = require("./merge");
+const applyOps = require("./ops");
+const createStore = require("./storage");
 const parseUrl = require("url-parse");
 const Backoff = require("backo");
 
-const PROTO_VERISON = "v2";
+const PROTO_VERISON = "v3";
+//PROTO is what is advertised on the wire. A server that predates it ignores the
+//parameter and replies with v2, which this client still understands, so old and
+//new pairings both keep working.
+const PROTO = 3;
 const PING_IN_INTERVAL = 45 * 1000;
 const PING_OUT_INTERVAL = 25 * 1000;
 const SLEEP_CHECK = 5 * 1000;
@@ -51,6 +57,9 @@ class Velox {
     this.url = url;
     this.id = "";
     this.version = 0;
+    this.root = "";
+    this.store = createStore(this.opts, url, root);
+    this.restore();
     this.onpatch = function (op) {
       /*noop*/
     };
@@ -102,11 +111,17 @@ class Velox {
     //convert to url object
     let u = parseUrl(url, true);
     //add query params
+    u.query.p = PROTO;
     if (this.version) {
       u.query.v = this.version;
     }
     if (this.id) {
       u.query.id = this.id;
+    }
+    //the resume token: with it the server can send a patch spanning however
+    //many versions were missed, instead of the whole document
+    if (this.root) {
+      u.query.h = this.root;
     }
     //add auth
     if (this.opts.username) {
@@ -208,14 +223,31 @@ class Velox {
       return;
     }
     if (update.id) {
+      //a different state id means a different server; anything persisted for
+      //the old one is meaningless
+      if (this.id && this.id !== update.id && this.store) {
+        this.store.clear();
+      }
       this.id = update.id;
     }
-    if (!update.body || !this.obj) {
+    if (!this.obj || (!update.body && !update.ops)) {
       this.onerror("null objects");
       return;
     }
     //perform update
-    if (update.delta) {
+    if (update.ops) {
+      //protocol v3: an ordered operation list against the tree named by base
+      try {
+        applyOps(this.obj, update.ops);
+      } catch (err) {
+        //the document and the server have diverged; drop the resume token so
+        //the next connection is served a full snapshot
+        this.root = "";
+        if (this.store) this.store.clear();
+        this.onerror(err);
+        return;
+      }
+    } else if (update.delta) {
       // apply to doc
       try {
         jsonpatch.apply(this.obj, update.body);
@@ -225,13 +257,43 @@ class Velox {
     } else {
       merge(this.obj, update.body);
     }
+    if (update.root !== undefined) {
+      this.root = update.root;
+    }
     //auto-angular
     if (typeof this.obj.$apply === "function") this.obj.$apply();
     //update
     this.onupdate(this.obj);
     this.version = update.version;
+    this.persist();
     //successful msg resets retry counter
     this.backoff.reset();
+  }
+  //restore hydrates the document from storage so a reload starts from the last
+  //known state and only needs the operations published since.
+  restore() {
+    if (!this.store) return;
+    let saved = this.store.load();
+    if (!saved) return;
+    try {
+      merge(this.obj, saved.state);
+    } catch (err) {
+      this.store.clear();
+      return;
+    }
+    this.id = saved.id;
+    this.version = saved.version || 0;
+    this.root = saved.root || "";
+  }
+  persist() {
+    //without a resume token the server cannot use a stored document anyway
+    if (!this.store || !this.root || !this.id) return;
+    this.store.save({
+      id: this.id,
+      version: this.version,
+      root: this.root,
+      state: this.obj
+    });
   }
   connopen() {
     this.statusCheck();
@@ -294,6 +356,7 @@ velox.sse = function (url, obj, opts) {
   return new Velox(SSE, url, obj, opts);
 };
 velox.proto = PROTO_VERISON;
+velox.protoVersion = PROTO;
 velox.connections = connections;
 velox.online = true;
 module.exports = velox;
