@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -294,5 +295,80 @@ func TestV3GoClientStaysInSync(t *testing.T) {
 	}
 	if client.Version() == 0 {
 		t.Fatal("client never recorded a version")
+	}
+}
+
+// TestV3GoClientResyncsOnForeignBase checks the client refuses operations that
+// apply to a tree it does not hold. Hashes are opaque, so the base is the only
+// evidence available; operations applied to the wrong base can succeed and
+// leave the client silently wrong.
+func TestV3GoClientResyncsOnForeignBase(t *testing.T) {
+	var served atomic.Int64
+	// A server that hands out a snapshot, then operations against a base the
+	// client was never given.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		round := served.Add(1)
+		resume := r.URL.Query().Get("h")
+		write := func(update velox.Update) {
+			encoded, _ := json.Marshal(update)
+			fmt.Fprintf(w, "data: %s\n\n", encoded)
+			flusher.Flush()
+		}
+		if round == 1 {
+			if resume != "" {
+				t.Errorf("first connection sent a resume token %q", resume)
+			}
+			write(velox.Update{ID: "s1", Version: 1, Proto: 3, Root: "good", Body: json.RawMessage(`{"counter":1}`)})
+			write(velox.Update{Version: 2, Root: "next", Base: "a-tree-never-sent", Ops: json.RawMessage(`[["s",["counter"],999]]`)})
+			<-r.Context().Done()
+			return
+		}
+		// The resync must come back without a resume token.
+		if resume != "" {
+			t.Errorf("resync sent resume token %q, want none", resume)
+		}
+		write(velox.Update{ID: "s1", Version: 3, Proto: 3, Root: "fresh", Body: json.RawMessage(`{"counter":7}`)})
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	type held struct {
+		sync.Mutex
+		Counter int `json:"counter"`
+	}
+	data := &held{}
+	client, err := velox.NewClient(server.URL, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.MinRetryDelay = 5 * time.Millisecond
+
+	updates := make(chan int, 8)
+	client.OnUpdate = func() {
+		data.Lock()
+		defer data.Unlock()
+		updates <- data.Counter
+	}
+	client.OnError = func(error) {}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go client.Connect(ctx)
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case counter := <-updates:
+			if counter == 999 {
+				t.Fatal("operations from a foreign base were applied")
+			}
+			if counter == 7 {
+				return // resynced onto a fresh snapshot
+			}
+		case <-deadline:
+			t.Fatal("client never resynced")
+		}
 	}
 }

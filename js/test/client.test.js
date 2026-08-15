@@ -120,15 +120,53 @@ assert.strictEqual(reloaded.counter, 42);
 console.log("  ok   resumes with operations instead of a snapshot");
 
 // ---------------------------------------------------------------
-// Divergence and server identity.
+// The persisted blob must not tear: metadata and state are read together.
+// ---------------------------------------------------------------
+deliver({version: 10, root: "root10", base: "rootZ", ops: [["s", ["counter"], 100]]});
+// More updates land before the debounce fires, which is the normal case.
+deliver({version: 11, root: "root11", base: "root10", ops: [["s", ["counter"], 101]]});
+v2.store.flush();
+const blob = JSON.parse(storage.data.values().next().value);
+assert.strictEqual(blob.state.counter, 101, "stored state was not the latest");
+assert.strictEqual(blob.version, 11, "stored version did not match the stored state");
+assert.strictEqual(blob.root, "root11", "stored token did not match the stored state");
+console.log("  ok   persisted blob cannot tear across the debounce");
+
+// ---------------------------------------------------------------
+// Divergence recovery.
 // ---------------------------------------------------------------
 let errors = [];
 v2.onerror = e => errors.push(e);
-deliver({version: 10, root: "rootY", base: "rootZ", ops: [["s", ["missing", "deep"], 1]]});
-assert.strictEqual(errors.length, 1, "a bad operation did not raise an error");
-assert.strictEqual(v2.root, "", "resume token survived divergence");
+
+// Operations against a base we do not hold must never be applied: opaque
+// hashes mean this is the only check available, and applying them could
+// succeed against the wrong document.
+deliver({version: 12, root: "rootX", base: "not-the-held-root", ops: [["s", ["counter"], 999]]});
+assert.strictEqual(errors.length, 1, "a base mismatch was accepted");
+assert.notStrictEqual(reloaded.counter, 999, "operations from a foreign base were applied");
+assert.strictEqual(v2.root, "", "resume token survived a base mismatch");
+assert.strictEqual(v2.version, 0, "version survived a base mismatch");
+assert.deepStrictEqual(reloaded, {}, "diverged document was not discarded");
 assert.strictEqual(storage.data.size, 0, "diverged state was left in storage");
-console.log("  ok   divergence drops the resume token and clears storage");
+// A resync must reconnect, and must not ask to resume.
+assert.ok(!/[?&]h=/.test(FakeEventSource.last.url), "resync still sent a resume token: " + FakeEventSource.last.url);
+console.log("  ok   base mismatch discards the document and reconnects for a snapshot");
+
+// A failing operation is the other divergence route.
+deliver({id: "state-2", version: 1, proto: 3, root: "fresh", body: {counter: 1}});
+errors.length = 0;
+deliver({version: 2, root: "next", base: "fresh", ops: [["s", ["missing", "deep"], 1]]});
+assert.strictEqual(errors.length, 1, "a bad operation did not raise an error");
+assert.strictEqual(v2.root, "", "resume token survived a failed operation");
+assert.deepStrictEqual(reloaded, {}, "partially applied document was kept");
+console.log("  ok   a failed operation discards the document and reconnects");
+
+// Caller-owned properties survive a resync; they are not part of the document.
+deliver({id: "state-2", version: 1, proto: 3, root: "r1", body: {counter: 1}});
+reloaded.$mine = "kept";
+deliver({version: 2, root: "r2", base: "wrong", ops: [["s", ["counter"], 2]]});
+assert.strictEqual(reloaded.$mine, "kept", "resync discarded a caller-owned property");
+console.log("  ok   resync leaves caller-owned $ properties alone");
 
 v2.disconnect();
 

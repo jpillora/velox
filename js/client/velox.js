@@ -236,15 +236,19 @@ class Velox {
     }
     //perform update
     if (update.ops) {
-      //protocol v3: an ordered operation list against the tree named by base
+      //protocol v3: an ordered operation list against the tree named by base.
+      //Hashes are opaque, so the base is the only evidence that the server is
+      //patching the document we actually hold. Applying operations to the wrong
+      //base can succeed and leave us silently wrong, which persistence would
+      //then keep across reloads, so anything unexpected resyncs instead.
+      if (update.base !== this.root) {
+        this.resync("velox: operations apply to " + update.base + ", not the state held");
+        return;
+      }
       try {
         applyOps(this.obj, update.ops);
       } catch (err) {
-        //the document and the server have diverged; drop the resume token so
-        //the next connection is served a full snapshot
-        this.root = "";
-        if (this.store) this.store.clear();
-        this.onerror(err);
+        this.resync(err);
         return;
       }
     } else if (update.delta) {
@@ -288,12 +292,34 @@ class Velox {
   persist() {
     //without a resume token the server cannot use a stored document anyway
     if (!this.store || !this.root || !this.id) return;
-    this.store.save({
+    //Deliberately a function, evaluated when the debounce fires. Capturing the
+    //metadata now but serialising this.obj later would let updates arriving in
+    //between tear the two apart: the blob would claim an old version while
+    //holding newer state, and resuming from it would apply the server's
+    //operations to the wrong base.
+    this.store.save(() => ({
       id: this.id,
       version: this.version,
       root: this.root,
       state: this.obj
-    });
+    }));
+  }
+  //resync abandons the local document and reconnects for a full snapshot.
+  //A diverged document cannot be repaired from a patch stream, and keeping it
+  //would mean serving wrong state indefinitely — previously until the server's
+  //state id happened to rotate, and with persistence enabled, across reloads
+  //too.
+  resync(reason) {
+    for (let k in this.obj) {
+      //$-prefixed properties belong to the caller, not to the synced document
+      if (k[0] !== "$") delete this.obj[k];
+    }
+    this.version = 0;
+    this.root = "";
+    if (this.store) this.store.clear();
+    this.onerror(reason);
+    //reconnect with no resume token, which the server answers with a snapshot
+    this.retry();
   }
   connopen() {
     this.statusCheck();

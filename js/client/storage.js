@@ -11,6 +11,10 @@
 //   replaced server is detected and the stored copy discarded.
 const DEBOUNCE = 2000;
 
+function skipCallerKeys(key, value) {
+  return key[0] === "$" ? undefined : value;
+}
+
 class Store {
   constructor(key, backend) {
     this.key = key;
@@ -43,9 +47,13 @@ class Store {
   }
 
   //save schedules a write. Repeated calls collapse into one.
-  save(snapshot) {
+  //
+  //build is a function rather than a value so that everything it captures is
+  //read at the same instant, when the debounce fires. Passing a value would let
+  //the metadata and the document it describes drift apart across the delay.
+  save(build) {
     if (!this.enabled) return;
-    this.pending = snapshot;
+    this.pending = build;
     if (this.timer) return;
     this.timer = setTimeout(this.flush.bind(this), DEBOUNCE);
   }
@@ -53,10 +61,16 @@ class Store {
   flush() {
     this.timer = null;
     if (!this.enabled || !this.pending) return;
-    let snapshot = this.pending;
+    let build = this.pending;
     this.pending = null;
     try {
-      this.backend.setItem(this.key, JSON.stringify(snapshot));
+      //one key, one write: the blob is stored atomically, so a second tab
+      //either sees the whole previous entry or the whole new one.
+      //$-prefixed properties belong to the caller rather than to the synced
+      //document — the merge and the resync both skip them — so they are left
+      //out here too, or a reload would restore the previous session's local UI
+      //state as if the server had sent it.
+      this.backend.setItem(this.key, JSON.stringify(build(), skipCallerKeys));
     } catch (err) {
       //most likely QuotaExceededError; give up quietly for this session
       this.enabled = false;
@@ -65,6 +79,9 @@ class Store {
   }
 
   clear() {
+    clearTimeout(this.timer);
+    this.timer = null;
+    this.pending = null;
     if (!this.backend) return;
     try {
       this.backend.removeItem(this.key);

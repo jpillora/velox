@@ -336,44 +336,45 @@ func (c *Client[T]) readEvents(ctx context.Context) error {
 			// Treat empty body as explicit state clear
 			c.stateMap = nil
 			c.root = ""
-		} else if len(update.Ops) > 0 && c.stateMap != nil {
+		} else if len(update.Ops) > 0 {
 			// Protocol v3: an ordered operation list against the tree we hold.
+			// Hashes are opaque, so the base is the only evidence that the server
+			// is patching the document we actually have. Operations applied to the
+			// wrong base can succeed and leave us silently wrong, so anything
+			// unexpected resyncs rather than carrying on.
+			var err error
+			if c.stateMap == nil || update.Base != c.root {
+				err = fmt.Errorf("operations apply to %q, not the state held", update.Base)
+			}
 			var ops []op
-			if err := json.Unmarshal(update.Ops, &ops); err != nil {
-				c.root = ""
-				c.mu.Unlock()
-				if c.OnError != nil {
-					c.OnError(fmt.Errorf("failed to unmarshal operations: %w", err))
-				}
-				continue
-			}
-			updated, err := applyOps(any(c.stateMap), ops)
 			if err == nil {
-				var ok bool
-				if c.stateMap, ok = updated.(map[string]any); !ok {
-					err = fmt.Errorf("operations replaced the root")
+				err = json.Unmarshal(update.Ops, &ops)
+			}
+			if err == nil {
+				var updated any
+				if updated, err = applyOps(any(c.stateMap), ops); err == nil {
+					var ok bool
+					if c.stateMap, ok = updated.(map[string]any); !ok {
+						err = fmt.Errorf("operations replaced the root")
+					}
 				}
+			}
+			if err == nil {
+				newState, err = json.Marshal(c.stateMap)
 			}
 			if err != nil {
-				// Our document and the server's have diverged. Dropping the token
-				// makes the next connection fall back to a full snapshot.
+				// A diverged document cannot be repaired from a patch stream.
+				// Drop it and return, so the retry loop reconnects and is served a
+				// full snapshot.
+				c.stateMap = nil
 				c.root = ""
+				c.version = 0
 				c.mu.Unlock()
 				if c.OnError != nil {
-					c.OnError(fmt.Errorf("failed to apply operations: %w", err))
+					c.OnError(fmt.Errorf("velox: resyncing: %w", err))
 				}
-				continue
+				return fmt.Errorf("velox: state diverged: %w", err)
 			}
-			merged, err := json.Marshal(c.stateMap)
-			if err != nil {
-				c.root = ""
-				c.mu.Unlock()
-				if c.OnError != nil {
-					c.OnError(fmt.Errorf("failed to marshal state: %w", err))
-				}
-				continue
-			}
-			newState = merged
 		} else if update.Delta && c.stateMap != nil {
 			// Apply delta patch in-place using mergeObjects (zero-alloc)
 			var patchMap map[string]any
