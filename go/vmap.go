@@ -2,6 +2,7 @@ package velox
 
 import (
 	"encoding/json"
+	"maps"
 	"reflect"
 	"sync"
 )
@@ -186,6 +187,16 @@ func (m *VMap[K, V]) Batch(fn func(data map[K]V)) {
 		m.data = make(map[K]V)
 	}
 	fn(m.data)
+	if m.cache.engaged() {
+		// The callback was handed the container's own map. A caller that keeps
+		// that reference can mutate the contents later, with no mutating method
+		// called and so no chance to mark the cache dirty — which would serve
+		// bytes that no longer describe the state. Re-homing the contents means
+		// any reference the callback kept now points somewhere the container no
+		// longer reads. It costs one copy, on an operation that is already doing
+		// bulk work.
+		m.data = maps.Clone(m.data)
+	}
 	m.push()
 }
 

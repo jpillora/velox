@@ -3,6 +3,7 @@ package velox
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"sync"
 )
 
@@ -173,7 +174,20 @@ func (s *VSlice[V]) Update(index int, fn func(*V)) bool {
 func (s *VSlice[V]) Batch(fn func(*[]V)) {
 	s.lock()
 	defer s.unlock()
-	fn(&s.data)
+	if !s.cache.engaged() {
+		fn(&s.data)
+		s.push()
+		return
+	}
+	// The callback would otherwise be handed a pointer to the container's own
+	// field, so a caller that keeps it could both replace the slice and mutate
+	// its elements later — with no mutating method called, and so no chance to
+	// mark the cache dirty. Hand it a local instead and take a fresh copy of the
+	// result, leaving anything it kept pointing where the container does not
+	// read. It costs one copy, on an operation already doing bulk work.
+	scratch := s.data
+	fn(&scratch)
+	s.data = slices.Clone(scratch)
 	s.push()
 }
 

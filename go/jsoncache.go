@@ -3,7 +3,20 @@ package velox
 import (
 	"reflect"
 	"sync"
+	"time"
 )
+
+// immutableTypes are types that are safe to copy despite containing a pointer,
+// because nothing in their API mutates what it points at. Without this,
+// deeplyImmutable's structural test rejects time.Time — it carries a
+// *time.Location — and with it practically every real state struct, which would
+// leave the incremental path switched off almost everywhere it matters.
+var immutableTypes = map[reflect.Type]bool{
+	reflect.TypeFor[time.Time]():     true,
+	reflect.TypeFor[time.Month]():    true,
+	reflect.TypeFor[time.Weekday]():  true,
+	reflect.TypeFor[time.Duration](): true,
+}
 
 // jsonCache memoises a container's encoding so that a push does not re-encode
 // subtrees that have not changed. It is what makes the marshal incremental:
@@ -64,6 +77,15 @@ func (c *jsonCache) invalidate() {
 	c.markDirty()
 }
 
+// engaged reports whether this container is currently caching, which callers
+// use to decide whether the extra work of keeping the cache honest is worth
+// doing at all.
+func (c *jsonCache) engaged() bool {
+	c.mut.Lock()
+	defer c.mut.Unlock()
+	return c.cacheable
+}
+
 // deeplyImmutable reports whether a value of type t can be handed out by copy
 // without the container losing track of mutations made through it.
 //
@@ -77,6 +99,9 @@ func (c *jsonCache) invalidate() {
 func deeplyImmutable(t reflect.Type, seen map[reflect.Type]bool) bool {
 	if t == nil {
 		return false
+	}
+	if immutableTypes[t] {
+		return true
 	}
 	switch t.Kind() {
 	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Interface,

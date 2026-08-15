@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // incRecord is deeply immutable: every field copies by value, so a value handed
@@ -198,6 +199,69 @@ func TestVerifyIncrementalCatchesAStaleCache(t *testing.T) {
 	}
 }
 
+// batchState covers the hole Batch would otherwise leave: the callback is
+// handed the container's own storage, and a caller that keeps that reference
+// can mutate the contents with no mutating method called.
+type batchState struct {
+	State
+	sync.RWMutex
+	Items VMap[string, countedRecord] `json:"items"`
+	List  VSlice[countedRecord]       `json:"list"`
+}
+
+func TestIncrementalBatchDoesNotLeakContainerStorage(t *testing.T) {
+	s := &batchState{}
+	s.State.Incremental = true
+	s.State.Data = Marshal(s)
+	bindAll(s, s, &quietPusher{state: &s.State, incremental: true})
+
+	var stashedMap map[string]countedRecord
+	s.Items.Batch(func(data map[string]countedRecord) {
+		data["a"] = countedRecord{Value: "before"}
+		stashedMap = data
+	})
+	var stashedSlice *[]countedRecord
+	s.List.Batch(func(data *[]countedRecord) {
+		*data = append(*data, countedRecord{Value: "before"})
+		stashedSlice = data
+	})
+
+	first, err := s.State.Data()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Mutate through the stashed references, exactly as a caller that kept them
+	// would. Neither may reach what the container now holds.
+	stashedMap["a"] = countedRecord{Value: "smuggled"}
+	stashedMap["b"] = countedRecord{Value: "smuggled"}
+	*stashedSlice = append(*stashedSlice, countedRecord{Value: "smuggled"})
+	(*stashedSlice)[0] = countedRecord{Value: "smuggled"}
+
+	second, err := s.State.Data()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(second), "smuggled") {
+		t.Fatalf("a reference kept from Batch reached the container: %s", second)
+	}
+	if string(first) != string(second) {
+		t.Fatalf("state changed without a mutating method:\n first  %s\n second %s", first, second)
+	}
+	// The cache must still be doing its job afterwards.
+	if !s.Items.cache.engaged() || !s.List.cache.engaged() {
+		t.Fatal("Batch switched caching off rather than re-homing")
+	}
+	s.Items.Set("c", countedRecord{Value: "proper"})
+	third, err := s.State.Data()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(third), "proper") {
+		t.Fatal("a proper mutation after Batch was not observed")
+	}
+}
+
 func TestDeeplyImmutable(t *testing.T) {
 	tests := []struct {
 		value any
@@ -208,6 +272,12 @@ func TestDeeplyImmutable(t *testing.T) {
 		{float64(0), true},
 		{true, true},
 		{incRecord{}, true},
+		// time.Time carries a *time.Location, so the structural test alone
+		// rejects it — and with it most real state structs.
+		{time.Time{}, true},
+		{time.Duration(0), true},
+		{struct{ At time.Time }{}, true},
+		{[]time.Time(nil), false},
 		{[4]int{}, true},
 		{[4]incRecord{}, true},
 		{struct{ A struct{ B string } }{}, true},
