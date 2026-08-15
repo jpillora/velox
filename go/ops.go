@@ -123,7 +123,7 @@ func (d *differ) emit(o op) {
 }
 
 func (d *differ) emitSet(node *mnode) {
-	d.emit(op{kind: opSet, value: node.appendJSON(nil)})
+	d.emit(op{kind: opSet, value: node.appendJSON(make([]byte, 0, node.size))})
 }
 
 // emitReplacement assigns b over a. A v3 "s" operation is a true assignment,
@@ -135,7 +135,8 @@ func (d *differ) emitReplacement(a, b *mnode) error {
 		d.emitSet(b)
 		return nil
 	}
-	previous, current := a.appendJSON(nil), b.appendJSON(nil)
+	previous := a.appendJSON(make([]byte, 0, a.size))
+	current := b.appendJSON(make([]byte, 0, b.size))
 	if firstJSONByte(previous) != '{' || firstJSONByte(current) != '{' {
 		d.emitSet(b)
 		return nil

@@ -36,11 +36,11 @@ const (
 type mnode struct {
 	hash [16]byte
 	kind mkind
-	// size approximates this subtree's encoded length. It is what lets the
-	// differ notice that the operations describing a change have grown larger
-	// than the thing they describe, and send the subtree instead. Object keys
-	// are measured unescaped, so it is an estimate, which is all a
-	// send-the-smaller decision needs.
+	// size is the encoded length of the bytes this node was built from. A node
+	// reused for a semantically-equal but differently-encoded subtree keeps its
+	// own length, so this is within a cosmetic difference of the current
+	// encoding — which is all the differ's send-the-smaller decision needs. It
+	// also sizes the buffer when a subtree is re-encoded as an operation value.
 	size int
 	raw  []byte   // leaf only: owned copy of the encoded value
 	keys []string // object only, sorted so key order cannot affect the hash
@@ -251,27 +251,23 @@ func (b *merkleBuilder) buildObject(prev *mnode, prevRaw, newRaw json.RawMessage
 		return nil, err
 	}
 	prevIsObject := prev != nil && prev.kind == kindObject
-	var prevLevel *objectLevel
+	// The previous level is only ever consulted by key, so rawObject suffices;
+	// scanObjectLevel would sort a key list nothing reads.
+	var prevValues rawObjectMap
 	if prevIsObject && prevRaw != nil {
-		if prevLevel, err = scanObjectLevel(prevRaw); err != nil {
+		if prevValues, err = rawObject(prevRaw); err != nil {
 			return nil, err
 		}
 	}
 
-	node := &mnode{kind: kindObject, keys: level.keys, kids: make([]*mnode, len(level.keys))}
-	node.size = len("{}") + separators(len(level.keys))
+	node := &mnode{kind: kindObject, keys: level.keys, kids: make([]*mnode, len(level.keys)), size: len(newRaw)}
 	shared := prevIsObject && len(prev.keys) == len(level.keys)
 	for i, key := range level.keys {
-		var prevKidRaw json.RawMessage
-		if prevLevel != nil {
-			prevKidRaw = prevLevel.values[key]
-		}
-		kid, err := b.build(prev.kidByKey(key), prevKidRaw, level.values[key])
+		kid, err := b.build(prev.kidByKey(key), prevValues[key], level.values[key])
 		if err != nil {
 			return nil, err
 		}
 		node.kids[i] = kid
-		node.size += len(key) + len(`"":`) + kid.size
 		if shared && (prev.keys[i] != key || prev.kids[i] != kid) {
 			shared = false
 		}
@@ -297,8 +293,7 @@ func (b *merkleBuilder) buildArray(prev *mnode, prevRaw, newRaw json.RawMessage)
 		}
 	}
 
-	node := &mnode{kind: kindArray, kids: make([]*mnode, len(elements))}
-	node.size = len("[]") + separators(len(elements))
+	node := &mnode{kind: kindArray, kids: make([]*mnode, len(elements)), size: len(newRaw)}
 	shared := prevIsArray && len(prev.kids) == len(elements)
 	for i, element := range elements {
 		var prevKid *mnode
@@ -314,7 +309,6 @@ func (b *merkleBuilder) buildArray(prev *mnode, prevRaw, newRaw json.RawMessage)
 			return nil, err
 		}
 		node.kids[i] = kid
-		node.size += kid.size
 		if shared && prev.kids[i] != kid {
 			shared = false
 		}
