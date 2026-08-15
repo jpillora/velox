@@ -32,17 +32,26 @@ type conn struct {
 	first       uint32
 	pushing     uint32
 	queued      uint32
-	sendVerMut  sync.Mutex // serialises send, protects version
+	sendVerMut  sync.Mutex // serialises send, protects version and baseHash
 	version     int64
+	// proto is the protocol the client asked for. Anything below 3 — including
+	// a client that asked for nothing — is served v2 unchanged.
+	proto int
+	// baseHash is the opaque root the client currently holds. It survives a
+	// reconnect because the client sends it back as the "h" query parameter,
+	// which is what turns a page reload into a patch instead of a snapshot.
+	baseHash string
 }
 
-func newConn(id int64, addr string, state *State, version int64) *conn {
+func newConn(id int64, addr string, state *State, version int64, proto int, baseHash string) *conn {
 	return &conn{
 		connectedCh: make(chan struct{}),
 		id:          id,
 		addr:        addr,
 		state:       state,
 		version:     version,
+		proto:       proto,
+		baseHash:    baseHash,
 	}
 }
 
@@ -168,9 +177,23 @@ func (c *conn) Push() {
 	//first push? include id
 	if atomic.CompareAndSwapUint32(&c.first, 0, 1) {
 		update.ID = d.id
+		if c.proto >= 3 {
+			update.Proto = ProtoVersion
+		}
 	}
 	//choose optimal update (send the smallest)
-	if d.delta != nil &&
+	if c.proto >= 3 {
+		update.Root = d.rootHash
+		//a client whose base is still retained gets operations against it,
+		//however many versions behind it has fallen; anything else, including a
+		//base evicted from the history, falls back to the whole document
+		if ops, ok := c.state.opsFor(c.baseHash); ok && len(ops) < len(d.bytes) {
+			update.Base = c.baseHash
+			update.Ops = ops
+		} else {
+			update.Body = d.bytes
+		}
+	} else if d.delta != nil &&
 		c.Version() == (d.version-1) &&
 		len(d.bytes) > 0 &&
 		len(d.delta) < len(d.bytes) {
@@ -202,5 +225,8 @@ func (c *conn) send(upd *Update) error {
 	}
 	// mark new current version
 	c.version = upd.Version
+	if upd.Root != "" {
+		c.baseHash = upd.Root
+	}
 	return nil
 }

@@ -38,11 +38,12 @@ type Client[T any] struct {
 
 	// internal state
 	mu        sync.Mutex
-	data      *T               // pointer to user's struct
-	locker    sync.Locker      // non-nil if data implements sync.Locker
-	stateMap  map[string]any   // cached unmarshaled state for fast delta merge
-	id        string           // server-assigned state ID
-	version   int64            // current version
+	data      *T             // pointer to user's struct
+	locker    sync.Locker    // non-nil if data implements sync.Locker
+	stateMap  map[string]any // cached unmarshaled state for fast delta merge
+	id        string         // server-assigned state ID
+	version   int64          // current version
+	root      string         // opaque v3 resume token for the state we hold
 	connected bool
 	body      io.ReadCloser
 	dec       *eventsource.Decoder
@@ -185,14 +186,20 @@ func (c *Client[T]) connectOnce(ctx context.Context) error {
 	}
 
 	c.mu.Lock()
+	q := u.Query()
+	q.Set("p", strconv.Itoa(ProtoVersion))
 	if c.version > 0 {
-		q := u.Query()
 		q.Set("v", strconv.FormatInt(c.version, 10))
 		if c.id != "" {
 			q.Set("id", c.id)
 		}
-		u.RawQuery = q.Encode()
+		// The resume token lets the server send operations spanning however many
+		// versions were missed while disconnected, rather than a full snapshot.
+		if c.root != "" {
+			q.Set("h", c.root)
+		}
 	}
+	u.RawQuery = q.Encode()
 	c.mu.Unlock()
 
 	// Create request
@@ -312,6 +319,11 @@ func (c *Client[T]) readEvents(ctx context.Context) error {
 		// Update metadata
 		c.mu.Lock()
 		if update.ID != "" {
+			if c.id != "" && c.id != update.ID {
+				// A different state id means a different server, so the token we
+				// hold names a tree it knows nothing about.
+				c.root = ""
+			}
 			c.id = update.ID
 		}
 		if update.Version > 0 {
@@ -320,9 +332,48 @@ func (c *Client[T]) readEvents(ctx context.Context) error {
 
 		// Apply update to internal state tracker
 		var newState json.RawMessage
-		if len(update.Body) == 0 {
+		if len(update.Body) == 0 && len(update.Ops) == 0 {
 			// Treat empty body as explicit state clear
 			c.stateMap = nil
+			c.root = ""
+		} else if len(update.Ops) > 0 && c.stateMap != nil {
+			// Protocol v3: an ordered operation list against the tree we hold.
+			var ops []op
+			if err := json.Unmarshal(update.Ops, &ops); err != nil {
+				c.root = ""
+				c.mu.Unlock()
+				if c.OnError != nil {
+					c.OnError(fmt.Errorf("failed to unmarshal operations: %w", err))
+				}
+				continue
+			}
+			updated, err := applyOps(any(c.stateMap), ops)
+			if err == nil {
+				var ok bool
+				if c.stateMap, ok = updated.(map[string]any); !ok {
+					err = fmt.Errorf("operations replaced the root")
+				}
+			}
+			if err != nil {
+				// Our document and the server's have diverged. Dropping the token
+				// makes the next connection fall back to a full snapshot.
+				c.root = ""
+				c.mu.Unlock()
+				if c.OnError != nil {
+					c.OnError(fmt.Errorf("failed to apply operations: %w", err))
+				}
+				continue
+			}
+			merged, err := json.Marshal(c.stateMap)
+			if err != nil {
+				c.root = ""
+				c.mu.Unlock()
+				if c.OnError != nil {
+					c.OnError(fmt.Errorf("failed to marshal state: %w", err))
+				}
+				continue
+			}
+			newState = merged
 		} else if update.Delta && c.stateMap != nil {
 			// Apply delta patch in-place using mergeObjects (zero-alloc)
 			var patchMap map[string]any
@@ -351,6 +402,9 @@ func (c *Client[T]) readEvents(ctx context.Context) error {
 				c.stateMap = m
 			}
 			newState = update.Body
+		}
+		if update.Root != "" {
+			c.root = update.Root
 		}
 		c.mu.Unlock()
 

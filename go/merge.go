@@ -8,52 +8,74 @@ import (
 	"strconv"
 )
 
-// mergePatcher owns the raw previous state. Object levels are decoded lazily
-// while diffing, so byte-identical subtrees do not become interface trees.
+// mergePatcher owns the raw previous state and the merkle tree built from it.
+// Building the tree is the diff: a subtree whose bytes are unchanged returns
+// the previous node outright, so it is neither re-walked nor re-validated, and
+// both versions go on sharing it.
 type mergePatcher struct {
-	prev []byte
+	prev     []byte
+	tree     *mnode
+	leafSize int
+	created  int // nodes the most recent build allocated
 }
 
-// patch computes a merge patch from cached previous state to modifiedJSON.
-// It returns the patch bytes and updates the cache to modifiedJSON.
-func (m *mergePatcher) patch(modifiedJSON []byte) ([]byte, error) {
-	if m.prev != nil && bytes.Equal(m.prev, modifiedJSON) {
-		return []byte(`{}`), nil
+func (m *mergePatcher) builder() merkleBuilder {
+	size := m.leafSize
+	if size <= 0 {
+		size = DefaultMerkleLeafSize
 	}
+	return merkleBuilder{leafSize: size}
+}
 
-	if !json.Valid(modifiedJSON) {
-		return nil, errors.New("invalid JSON state")
+// build derives the tree for modifiedJSON without publishing anything. A null
+// state has no tree; every other state must be a JSON object, which the object
+// scan enforces.
+func (m *mergePatcher) build(modifiedJSON []byte) (*mnode, int, error) {
+	if isJSONNull(modifiedJSON) {
+		return nil, 0, nil
 	}
-	if err := validateJSONNumbers(modifiedJSON); err != nil {
-		return nil, err
+	if err := checkJSONRootObject(modifiedJSON); err != nil {
+		return nil, 0, err
 	}
-	modified, err := rawObject(modifiedJSON)
+	builder := m.builder()
+	// The root is always expanded, however small it is, so that top-level keys
+	// stay individually addressable.
+	root, err := builder.buildObject(m.tree, m.prev, modifiedJSON)
+	return root, builder.created, err
+}
+
+// update refreshes the tree from modifiedJSON and returns the operations that
+// carry the previous state to it. The cache is published only after every
+// fallible step has succeeded, so a rejected state leaves the patcher untouched.
+func (m *mergePatcher) update(modifiedJSON []byte, arrayOps bool) (root *mnode, ops []op, err error) {
+	if m.prev != nil && bytes.Equal(m.prev, modifiedJSON) {
+		return m.tree, nil, nil
+	}
+	root, created, err := m.build(modifiedJSON)
+	if err != nil {
+		return nil, nil, err
+	}
+	if m.prev != nil {
+		if ops, err = diffTrees(m.tree, root, arrayOps); err != nil {
+			return nil, nil, err
+		}
+	}
+	// The caller may reuse its marshal buffer, so the snapshot is cloned. Leaves
+	// own their bytes too, leaving the tree independent of both buffers.
+	m.prev = bytes.Clone(modifiedJSON)
+	m.tree = root
+	m.created = created
+	return root, ops, nil
+}
+
+// patch computes an RFC 7386 merge patch from cached previous state to
+// modifiedJSON. It returns the patch bytes and updates the cache.
+func (m *mergePatcher) patch(modifiedJSON []byte) ([]byte, error) {
+	_, ops, err := m.update(modifiedJSON, false)
 	if err != nil {
 		return nil, err
 	}
-
-	patchBytes := []byte(`{}`)
-	if m.prev != nil {
-		previous, err := rawObject(m.prev)
-		if err != nil {
-			return nil, err
-		}
-		diff, err := rawObjectDiff(previous, modified)
-		if err != nil {
-			return nil, err
-		}
-		if len(diff) != 0 {
-			patchBytes, err = json.Marshal(diff)
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	// The caller may reuse its marshal buffer. Publish the new cache only after
-	// every operation that can fail has succeeded.
-	m.prev = bytes.Clone(modifiedJSON)
-	return patchBytes, nil
+	return mergePatchFromOps(ops)
 }
 
 type rawObjectMap map[string]json.RawMessage
@@ -205,14 +227,26 @@ func skipJSONSpace(data []byte, i int) int {
 	return i
 }
 
+// scanJSONString returns the offset just past the string opening at start.
+// Locating the closing quote with IndexByte lets the string body be skipped a
+// word at a time rather than a byte at a time, which dominates scanning any
+// document whose bulk is string data. A quote preceded by an odd number of
+// backslashes is escaped and does not close the string.
 func scanJSONString(data []byte, start int) int {
-	for i := start + 1; i < len(data); i++ {
-		switch data[i] {
-		case '\\':
-			i++
-		case '"':
-			return i + 1
+	for i := start + 1; i <= len(data); {
+		offset := bytes.IndexByte(data[i:], '"')
+		if offset < 0 {
+			return len(data)
 		}
+		quote := i + offset
+		backslashes := 0
+		for k := quote - 1; k > start && data[k] == '\\'; k-- {
+			backslashes++
+		}
+		if backslashes%2 == 0 {
+			return quote + 1
+		}
+		i = quote + 1
 	}
 	return len(data)
 }

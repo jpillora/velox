@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -41,6 +42,31 @@ type State struct {
 	WriteTimeout time.Duration `json:"-"` // WriteTimeout is the maximum time to wait for a write to complete.
 	PingInterval time.Duration `json:"-"` // PingInterval is the time between pings to the client.
 	Debug        bool          `json:"-"` // Debug is used to enable debug logging.
+	//MerkleLeafSize is the subtree size below which the merkle tree stores an
+	//opaque leaf instead of addressable children. Larger values mean a smaller
+	//tree and coarser patches. Defaults to DefaultMerkleLeafSize.
+	MerkleLeafSize int `json:"-"`
+	//HistoryWindow is how far back a protocol v3 client may resume from.
+	//Defaults to DefaultHistoryWindow.
+	HistoryWindow time.Duration `json:"-"`
+	//HistoryMaxNodes caps the merkle nodes the resume history retains.
+	//Defaults to DefaultHistoryMaxNodes.
+	HistoryMaxNodes int `json:"-"`
+	//Incremental lets VMap/VSlice containers reuse their previous encoding when
+	//nothing in them changed, so a push re-encodes only the parts of the state
+	//that moved. It engages only for containers whose element type is safe to
+	//hand out by copy; see deeplyImmutable. Off by default.
+	//
+	//Must be set before SyncHandler, which is where containers are bound and
+	//where this is read. Note that encoding/json still compacts the bytes a
+	//cached container returns, so a push remains O(state) in scanning even when
+	//it re-encodes almost nothing.
+	Incremental bool `json:"-"`
+	//VerifyIncremental re-marshals the whole state on every push with every
+	//cache invalidated and fails the push if the result differs. It exists
+	//because a stale cache is a silent divergence rather than a crash; keep it
+	//on in tests. Expensive: it doubles the marshal.
+	VerifyIncremental bool `json:"-"`
 	//internal state
 	initMut sync.Mutex
 	initd   atomic.Bool
@@ -49,15 +75,28 @@ type State struct {
 	// transportFactory is a test seam for deterministic transport failures.
 	transportFactory func(*http.Request) transport
 	data             struct {
-		mut     sync.RWMutex
-		id      string //data id != conn id
-		bytes   []byte
-		delta   []byte
-		version int64
-		cleared bool         // clients hold no document: state was null or never published
-		patcher mergePatcher // owns the raw previous state for merge patches
+		mut      sync.RWMutex
+		id       string //data id != conn id
+		bytes    []byte
+		delta    []byte
+		version  int64
+		cleared  bool            // clients hold no document: state was null or never published
+		patcher  mergePatcher    // owns the raw previous state and its merkle tree
+		root     *mnode          // merkle root for the published state, nil when cleared
+		rootHash string          // opaque resume token for root
+		history  *versionHistory // recent roots, so lagging clients get a patch
+		// patchCache memoises v3 operation payloads by the base tree they apply
+		// to, so N clients sharing a base cost one diff rather than N. It is
+		// discarded whenever refresh publishes a new tree, which happens under
+		// data.mut's write lock while readers are excluded.
+		patchMut   sync.Mutex
+		patchCache map[string]json.RawMessage
 	}
-	push struct {
+	//caches holds every bound container, so VerifyIncremental can force an
+	//uncached encoding to compare against.
+	cacheMut sync.Mutex
+	caches   []*jsonCache
+	push     struct {
 		mut        sync.Mutex
 		ing        uint32
 		queued     uint32
@@ -84,6 +123,8 @@ func (s *State) init() error {
 	if s.PingInterval == 0 {
 		s.PingInterval = DefaultPingInterval
 	}
+	s.data.patcher.leafSize = s.MerkleLeafSize
+	s.data.history = newVersionHistory(s.HistoryWindow, s.HistoryMaxNodes)
 	if s.Data == nil {
 		return fmt.Errorf("no data function provided")
 	}
@@ -99,6 +140,7 @@ func (s *State) init() error {
 		b = bytes.Clone(b)
 		_, err = s.data.patcher.patch(b)
 	}
+	seeded := err == nil
 	if err != nil {
 		// Nothing usable was published, so treat clients as holding no document.
 		// The first successful refresh then sends a full snapshot: diffing a
@@ -117,6 +159,11 @@ func (s *State) init() error {
 		s.data.id = hex.EncodeToString(id)
 	}
 	s.data.version = 1
+	if seeded {
+		// Recorded after the version is assigned so the history's first entry
+		// names the version clients will actually be told they hold.
+		s.publishTree(true)
+	}
 	s.data.mut.Unlock()
 	// set connection fields
 	s.connMut.Lock()
@@ -129,6 +176,44 @@ func (s *State) init() error {
 
 func (s *State) self() *State {
 	return s
+}
+
+// incrementalEnabled reports whether containers may cache their encoding.
+func (s *State) incrementalEnabled() bool {
+	return s.Incremental
+}
+
+// registerCache records a bound container so its cache can be invalidated.
+func (s *State) registerCache(c *jsonCache) {
+	s.cacheMut.Lock()
+	s.caches = append(s.caches, c)
+	s.cacheMut.Unlock()
+}
+
+// invalidateCaches forces every container to re-encode on the next marshal.
+func (s *State) invalidateCaches() {
+	s.cacheMut.Lock()
+	caches := s.caches
+	s.cacheMut.Unlock()
+	for _, c := range caches {
+		c.invalidate()
+	}
+}
+
+// verifyIncremental re-marshals with every cache invalidated and reports any
+// disagreement with what the cached path produced. A mismatch means a container
+// handed out a value that was mutated behind its back, which would otherwise
+// surface as clients silently holding stale state.
+func (s *State) verifyIncremental(cached json.RawMessage) error {
+	s.invalidateCaches()
+	uncached, err := s.Data()
+	if err != nil {
+		return fmt.Errorf("verify marshal: %w", err)
+	}
+	if !bytes.Equal(cached, uncached) {
+		return fmt.Errorf("incremental marshal diverged: cached %d bytes, uncached %d bytes", len(cached), len(uncached))
+	}
+	return nil
 }
 
 func (s *State) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -158,15 +243,25 @@ func (state *State) Handle(w http.ResponseWriter, r *http.Request) (Conn, error)
 	if err := state.init(); err != nil {
 		return nil, fmt.Errorf("init: %w", err)
 	}
+	query := r.URL.Query()
 	version := int64(0)
-	//matching id, allow user to pick version
-	if id := r.URL.Query().Get("id"); id != "" && id == state.data.id {
-		if v, err := strconv.ParseInt(r.URL.Query().Get("v"), 10, 64); err == nil && v > 0 {
+	baseHash := ""
+	//matching id, allow user to pick version. A mismatched id means a different
+	//state object — a restarted server, or another instance — so the client's
+	//version and resume token are meaningless and it takes a full snapshot.
+	if id := query.Get("id"); id != "" && id == state.data.id {
+		if v, err := strconv.ParseInt(query.Get("v"), 10, 64); err == nil && v > 0 {
 			version = v
 		}
+		baseHash = query.Get("h")
+	}
+	//protocol negotiation: absent or older than 3 is served v2 unchanged
+	proto := 0
+	if p, err := strconv.Atoi(query.Get("p")); err == nil && p > 0 {
+		proto = min(p, ProtoVersion)
 	}
 	//set initial connection state
-	conn := newConn(atomic.AddInt64(&connectionID, 1), r.RemoteAddr, state, version)
+	conn := newConn(atomic.AddInt64(&connectionID, 1), r.RemoteAddr, state, version, proto, baseHash)
 	//attempt connection over transport
 	//(negotiate websockets / start eventsource emitter)
 	//return when connected
@@ -380,12 +475,22 @@ func (s *State) refresh() (changed bool, err error) {
 	if err != nil {
 		return false, err
 	}
+	if s.Incremental && s.VerifyIncremental {
+		if err := s.verifyIncremental(newBytes); err != nil {
+			return false, err
+		}
+	}
 	if s.Debug {
 		log.Printf("velox: gopush marshaled %d bytes", len(newBytes))
 	}
 	s.data.mut.Lock()
 	defer s.data.mut.Unlock()
 	changed = false
+	// rebuilt records whether the patcher ran, which is when the merkle tree it
+	// owns has moved on and the published tree needs to catch up. That is not
+	// the same as changed: a semantically equal but differently encoded state
+	// rebuilds the tree while reporting no change.
+	rebuilt := false
 	if isJSONNull(newBytes) {
 		// special case, clear data
 		s.data.bytes = nil
@@ -402,6 +507,7 @@ func (s *State) refresh() (changed bool, err error) {
 		if err != nil {
 			return false, fmt.Errorf("create-patch: %w", err)
 		}
+		rebuilt = true
 		if s.data.cleared {
 			// Clients have no document to patch after a null state. Publish the
 			// restored object as a full snapshot, even if it matches the cache
@@ -434,7 +540,86 @@ func (s *State) refresh() (changed bool, err error) {
 	if changed {
 		s.data.version++
 	}
+	if isJSONNull(newBytes) {
+		s.clearTree()
+	} else if rebuilt {
+		s.publishTree(changed)
+	}
 	return changed, nil
+}
+
+// publishTree captures whatever tree the patcher last built as the published
+// one. The caller must hold data.mut for writing, which is also what makes
+// discarding the patch cache safe: readers computing patches hold the read lock,
+// so no reader can be mid-lookup against the tree being replaced.
+func (s *State) publishTree(record bool) {
+	if s.data.history == nil {
+		// refresh is reachable without init on internal paths, so the history is
+		// created on demand rather than depending on initialisation order.
+		s.data.history = newVersionHistory(s.HistoryWindow, s.HistoryMaxNodes)
+	}
+	s.data.root = s.data.patcher.tree
+	s.data.rootHash = rootHash(s.data.root)
+	if record {
+		s.data.history.record(s.data.version, s.data.root, s.data.patcher.created, time.Now())
+	}
+	s.discardPatchCache()
+}
+
+// clearTree marks clients as holding no document, which is what a null state
+// means. There is nothing for a later client to resume against, so no history
+// entry is recorded and every client takes a full snapshot.
+func (s *State) clearTree() {
+	s.data.root = nil
+	s.data.rootHash = ""
+	s.discardPatchCache()
+}
+
+func (s *State) discardPatchCache() {
+	s.data.patchMut.Lock()
+	s.data.patchCache = nil
+	s.data.patchMut.Unlock()
+}
+
+// opsFor returns the protocol v3 operation payload carrying the tree named by
+// baseHash to the published one, memoised so that N connections sharing a base
+// version cost one diff rather than N. The caller must hold data.mut for
+// reading, which pins the tree the cache is keyed against.
+//
+// It reports false when the base is unknown — the client is beyond the history
+// window, or the server restarted — leaving the caller to send a full snapshot.
+func (s *State) opsFor(baseHash string) (json.RawMessage, bool) {
+	if baseHash == "" || s.data.root == nil || baseHash == s.data.rootHash {
+		return nil, false
+	}
+	s.data.patchMut.Lock()
+	defer s.data.patchMut.Unlock()
+	if payload, ok := s.data.patchCache[baseHash]; ok {
+		return payload, payload != nil
+	}
+	if s.data.patchCache == nil {
+		s.data.patchCache = map[string]json.RawMessage{}
+	}
+	payload, err := s.buildOps(baseHash)
+	if err != nil && s.Debug {
+		log.Printf("velox: v3 diff from %s failed: %s", baseHash, err)
+	}
+	// A miss is memoised as nil so a client stuck on an evicted base is not
+	// re-diffed on every push.
+	s.data.patchCache[baseHash] = payload
+	return payload, payload != nil
+}
+
+func (s *State) buildOps(baseHash string) (json.RawMessage, error) {
+	base, ok := s.data.history.find(baseHash)
+	if !ok {
+		return nil, nil
+	}
+	ops, err := diffTrees(base, s.data.root, true)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(ops)
 }
 
 func isJSONNull(data []byte) bool {

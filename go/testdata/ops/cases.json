@@ -1,0 +1,403 @@
+[
+  {
+    "name": "scalar changed",
+    "before": {
+      "a": 1,
+      "b": "x"
+    },
+    "after": {
+      "a": 2,
+      "b": "x"
+    },
+    "ops": [
+      [
+        "s",
+        [
+          "a"
+        ],
+        2
+      ]
+    ]
+  },
+  {
+    "name": "key added",
+    "before": {
+      "a": 1
+    },
+    "after": {
+      "a": 1,
+      "b": {
+        "c": [
+          1,
+          2
+        ]
+      }
+    },
+    "ops": [
+      [
+        "s",
+        [
+          "b"
+        ],
+        {
+          "c": [
+            1,
+            2
+          ]
+        }
+      ]
+    ]
+  },
+  {
+    "name": "key deleted",
+    "before": {
+      "a": 1,
+      "b": 2
+    },
+    "after": {
+      "a": 1
+    },
+    "ops": [
+      [
+        "d",
+        [
+          "b"
+        ]
+      ]
+    ]
+  },
+  {
+    "name": "nested leaf",
+    "before": {
+      "o": {
+        "p": {
+          "q": "before",
+          "r": 1
+        }
+      }
+    },
+    "after": {
+      "o": {
+        "p": {
+          "q": "after",
+          "r": 1
+        }
+      }
+    },
+    "ops": [
+      [
+        "s",
+        [
+          "o",
+          "p",
+          "q"
+        ],
+        "after"
+      ]
+    ]
+  },
+  {
+    "name": "type changed",
+    "before": {
+      "v": {
+        "n": 1
+      }
+    },
+    "after": {
+      "v": "scalar"
+    },
+    "ops": [
+      [
+        "s",
+        [
+          "v"
+        ],
+        "scalar"
+      ]
+    ]
+  },
+  {
+    "name": "array element",
+    "before": {
+      "log": [
+        {
+          "m": "a"
+        },
+        {
+          "m": "b"
+        }
+      ]
+    },
+    "after": {
+      "log": [
+        {
+          "m": "a"
+        },
+        {
+          "m": "B"
+        }
+      ]
+    },
+    "ops": [
+      [
+        "s",
+        [
+          "log",
+          1,
+          "m"
+        ],
+        "B"
+      ]
+    ]
+  },
+  {
+    "name": "array shrunk",
+    "before": {
+      "log": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    "after": {
+      "log": [
+        1,
+        2
+      ]
+    },
+    "ops": [
+      [
+        "n",
+        [
+          "log"
+        ],
+        2
+      ]
+    ]
+  },
+  {
+    "name": "array grown",
+    "before": {
+      "log": [
+        1,
+        2
+      ]
+    },
+    "after": {
+      "log": [
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    "ops": [
+      [
+        "s",
+        [
+          "log",
+          2
+        ],
+        3
+      ],
+      [
+        "s",
+        [
+          "log",
+          3
+        ],
+        4
+      ]
+    ]
+  },
+  {
+    "name": "array resized and changed",
+    "before": {
+      "log": [
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    "after": {
+      "log": [
+        9,
+        2
+      ]
+    },
+    "ops": [
+      [
+        "n",
+        [
+          "log"
+        ],
+        2
+      ],
+      [
+        "s",
+        [
+          "log",
+          0
+        ],
+        9
+      ]
+    ]
+  },
+  {
+    "name": "nested arrays",
+    "before": {
+      "m": [
+        [
+          1,
+          2
+        ],
+        [
+          3,
+          4
+        ]
+      ]
+    },
+    "after": {
+      "m": [
+        [
+          1,
+          2
+        ],
+        [
+          3,
+          5
+        ]
+      ]
+    },
+    "ops": [
+      [
+        "s",
+        [
+          "m",
+          1,
+          1
+        ],
+        5
+      ]
+    ]
+  },
+  {
+    "name": "deep add and delete",
+    "before": {
+      "t": {
+        "keep": 1,
+        "drop": {
+          "x": 1
+        }
+      }
+    },
+    "after": {
+      "t": {
+        "keep": 1,
+        "add": [
+          true,
+          null
+        ]
+      }
+    },
+    "ops": [
+      [
+        "d",
+        [
+          "t",
+          "drop"
+        ]
+      ],
+      [
+        "s",
+        [
+          "t",
+          "add"
+        ],
+        [
+          true,
+          null
+        ]
+      ]
+    ]
+  },
+  {
+    "name": "numeric object keys",
+    "before": {
+      "m": {
+        "0": "a",
+        "1": "b"
+      }
+    },
+    "after": {
+      "m": {
+        "0": "a",
+        "1": "B"
+      }
+    },
+    "ops": [
+      [
+        "s",
+        [
+          "m",
+          "1"
+        ],
+        "B"
+      ]
+    ]
+  },
+  {
+    "name": "empty containers",
+    "before": {
+      "a": {},
+      "b": []
+    },
+    "after": {
+      "a": {
+        "x": 1
+      },
+      "b": [
+        1
+      ]
+    },
+    "ops": [
+      [
+        "s",
+        [
+          "a",
+          "x"
+        ],
+        1
+      ],
+      [
+        "s",
+        [
+          "b",
+          0
+        ],
+        1
+      ]
+    ]
+  },
+  {
+    "name": "unicode and escapes",
+    "before": {
+      "s": "before \" \\ 雪"
+    },
+    "after": {
+      "s": "after \" \\ 𝄞"
+    },
+    "ops": [
+      [
+        "s",
+        [
+          "s"
+        ],
+        "after \" \\ 𝄞"
+      ]
+    ]
+  }
+]

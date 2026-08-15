@@ -9,6 +9,19 @@ import (
 // bindable is implemented by VMap/VSlice (internal interface)
 type bindable interface {
 	bind(locker sync.Locker, pusher Pusher)
+	jsonCacheRef() *jsonCache
+}
+
+// cacheRegistrar is implemented by State so that bound containers can be
+// collected for VerifyIncremental without bind depending on State.
+type cacheRegistrar interface {
+	registerCache(*jsonCache)
+}
+
+func registerBound(pusher Pusher, b bindable) {
+	if registrar, ok := pusher.(cacheRegistrar); ok {
+		registrar.registerCache(b.jsonCacheRef())
+	}
 }
 
 var (
@@ -36,10 +49,12 @@ func bindValue(v reflect.Value, locker sync.Locker, pusher Pusher, root bool) {
 	if v.CanAddr() && v.Addr().CanInterface() {
 		if b, ok := v.Addr().Interface().(bindable); ok {
 			b.bind(locker, pusher)
+			registerBound(pusher, b)
 		}
 	} else if v.CanInterface() {
 		if b, ok := v.Interface().(bindable); ok {
 			b.bind(locker, pusher)
+			registerBound(pusher, b)
 		}
 	}
 

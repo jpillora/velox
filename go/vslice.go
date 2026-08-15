@@ -2,6 +2,7 @@ package velox
 
 import (
 	"encoding/json"
+	"reflect"
 	"sync"
 )
 
@@ -12,11 +13,16 @@ type VSlice[V any] struct {
 	locker sync.Locker
 	pusher Pusher
 	data   []V
+	cache  jsonCache // memoised encoding, engaged only when State.Incremental is set
 }
 
 func (s *VSlice[V]) bind(locker sync.Locker, pusher Pusher) {
 	s.locker = locker
 	s.pusher = pusher
+	s.cache.markDirty()
+	if incrementalRequested(pusher) {
+		s.cache.enable(reflect.TypeFor[V]())
+	}
 }
 
 func (s *VSlice[V]) rlock() {
@@ -53,7 +59,11 @@ func (s *VSlice[V]) unlock() {
 	}
 }
 
+// push notifies the state that this container changed. Marking the cache dirty
+// here rather than in each mutator means a mutator added later cannot forget to
+// do it, and it runs even on the client, where there is no pusher.
 func (s *VSlice[V]) push() {
+	s.cache.markDirty()
 	if s.pusher != nil {
 		s.pusher.Push()
 	}
@@ -177,16 +187,30 @@ func (s *VSlice[V]) Clear() {
 
 // MarshalJSON implements json.Marshaler.
 // No locking - parent already holds lock during marshal.
+//
+// A clean container returns its previous encoding rather than re-encoding its
+// contents, which is what keeps an unchanged subtree out of the marshal
+// entirely. Caching is off unless State.Incremental is set and V is safe to
+// hand out by copy; see deeplyImmutable.
 func (s *VSlice[V]) MarshalJSON() ([]byte, error) {
+	if encoded, ok := s.cache.get(); ok {
+		return encoded, nil
+	}
 	if s.data == nil {
 		return []byte("[]"), nil
 	}
-	return json.Marshal(s.data)
+	encoded, err := json.Marshal(s.data)
+	if err != nil {
+		return nil, err
+	}
+	s.cache.put(encoded)
+	return encoded, nil
 }
 
 // UnmarshalJSON implements json.Unmarshaler.
 // No locking - parent already holds lock during unmarshal.
 func (s *VSlice[V]) UnmarshalJSON(data []byte) error {
 	s.data = nil
+	s.cache.markDirty()
 	return json.Unmarshal(data, &s.data)
 }

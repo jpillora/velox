@@ -2,6 +2,7 @@ package velox
 
 import (
 	"encoding/json"
+	"reflect"
 	"sync"
 )
 
@@ -12,6 +13,7 @@ type VMap[K comparable, V any] struct {
 	locker sync.Locker // may also implement RLocker
 	pusher Pusher      // nil on client (no push)
 	data   map[K]V
+	cache  jsonCache // memoised encoding, engaged only when State.Incremental is set
 }
 
 func (m *VMap[K, V]) bind(locker sync.Locker, pusher Pusher) {
@@ -19,6 +21,10 @@ func (m *VMap[K, V]) bind(locker sync.Locker, pusher Pusher) {
 	m.pusher = pusher
 	if m.data == nil {
 		m.data = make(map[K]V)
+	}
+	m.cache.markDirty()
+	if incrementalRequested(pusher) {
+		m.cache.enable(reflect.TypeFor[V]())
 	}
 }
 
@@ -57,7 +63,11 @@ func (m *VMap[K, V]) unlock() {
 	}
 }
 
+// push notifies the state that this container changed. Marking the cache dirty
+// here rather than in each mutator means a mutator added later cannot forget to
+// do it, and it runs even on the client, where there is no pusher.
 func (m *VMap[K, V]) push() {
+	m.cache.markDirty()
 	if m.pusher != nil {
 		m.pusher.Push()
 	}
@@ -189,16 +199,30 @@ func (m *VMap[K, V]) Clear() {
 
 // MarshalJSON implements json.Marshaler.
 // No locking - parent already holds lock during marshal.
+//
+// A clean container returns its previous encoding rather than re-encoding its
+// contents, which is what keeps an unchanged subtree out of the marshal
+// entirely. Caching is off unless State.Incremental is set and V is safe to
+// hand out by copy; see deeplyImmutable.
 func (m *VMap[K, V]) MarshalJSON() ([]byte, error) {
+	if encoded, ok := m.cache.get(); ok {
+		return encoded, nil
+	}
 	if m.data == nil {
 		return []byte("{}"), nil
 	}
-	return json.Marshal(m.data)
+	encoded, err := json.Marshal(m.data)
+	if err != nil {
+		return nil, err
+	}
+	m.cache.put(encoded)
+	return encoded, nil
 }
 
 // UnmarshalJSON implements json.Unmarshaler.
 // No locking - parent already holds lock during unmarshal.
 func (m *VMap[K, V]) UnmarshalJSON(data []byte) error {
 	m.data = make(map[K]V) // Clear to handle deletions
+	m.cache.markDirty()
 	return json.Unmarshal(data, &m.data)
 }

@@ -660,7 +660,7 @@ func TestInitMarshalFailureRecoversWithFullSnapshot(t *testing.T) {
 			// Once the data function recovers, the first subscriber must trigger
 			// the refresh even when the application did not call Push explicitly.
 			ready.Store(true)
-			conn := newConn(1, "recovery", s, 0)
+			conn := newConn(1, "recovery", s, 0, 0, "")
 			if err := s.subscribe(conn); err != nil {
 				t.Fatalf("subscribe: %v", err)
 			}
@@ -738,7 +738,7 @@ func TestGopushActiveConnectionRefreshesAndBroadcasts(t *testing.T) {
 	})
 	s.Throttle = 0
 	updates := make(chan Update, 1)
-	c := newConn(1, "active", s, s.Version())
+	c := newConn(1, "active", s, s.Version(), 0, "")
 	c.transport = &recordingTransport{updates: updates}
 	defer func() {
 		close(c.connectedCh)
@@ -776,8 +776,8 @@ func TestSubscribeUsesFreshCacheWithoutMarshal(t *testing.T) {
 		calls.Add(1)
 		return json.RawMessage(`{"value":1}`), nil
 	})
-	first := newConn(1, "first", s, 0)
-	second := newConn(2, "second", s, 0)
+	first := newConn(1, "first", s, 0, 0, "")
+	second := newConn(2, "second", s, 0, 0, "")
 	defer func() {
 		close(first.connectedCh)
 		close(second.connectedCh)
@@ -822,7 +822,7 @@ func TestConcurrentSubscribersRefreshIdleStaleCacheOnce(t *testing.T) {
 	errCh := make(chan error, count)
 	var subscribers sync.WaitGroup
 	for i := range conns {
-		conns[i] = newConn(int64(i+1), "storm", s, 0)
+		conns[i] = newConn(int64(i+1), "storm", s, 0, 0, "")
 		conns[i].transport = &recordingTransport{updates: make(chan Update, 1)}
 		subscribers.Add(1)
 		go func(c *conn) {
@@ -854,7 +854,7 @@ func TestConcurrentSubscribersRefreshIdleStaleCacheOnce(t *testing.T) {
 
 func TestFreshSubscribeDoesNotWaitForPushMutex(t *testing.T) {
 	s := New(func() (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
-	c := newConn(1, "fresh", s, 0)
+	c := newConn(1, "fresh", s, 0, 0, "")
 	s.push.mut.Lock()
 	done := make(chan error, 1)
 	go func() { done <- s.subscribe(c) }()
@@ -874,7 +874,7 @@ func TestFreshSubscribeDoesNotWaitForPushMutex(t *testing.T) {
 
 func TestPushConnectionsDoesNotHoldConnectionMutexWhileReadingVersions(t *testing.T) {
 	s := New(func() (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
-	c := newConn(1, "blocked", s, s.Version())
+	c := newConn(1, "blocked", s, s.Version(), 0, "")
 	c.transport = &recordingTransport{updates: make(chan Update, 1)}
 	s.connMut.Lock()
 	s.conns[c.id] = c
@@ -907,9 +907,9 @@ func TestStaleSubscriberRefreshChangePushesExistingConnections(t *testing.T) {
 		return json.RawMessage(fmt.Sprintf(`{"value":%d}`, value.Load())), nil
 	})
 	updates := make(chan Update, 1)
-	existing := newConn(1, "existing", s, 0)
+	existing := newConn(1, "existing", s, 0, 0, "")
 	existing.transport = &recordingTransport{updates: updates}
-	newSubscriber := newConn(2, "new", s, 0)
+	newSubscriber := newConn(2, "new", s, 0, 0, "")
 	defer func() {
 		close(existing.connectedCh)
 		close(newSubscriber.connectedCh)
@@ -946,7 +946,7 @@ func TestReplacementSubscriberFirstFrameCurrentWithPendingPush(t *testing.T) {
 			return json.RawMessage(fmt.Sprintf(`{"value":%d}`, value.Load())), nil
 		})
 		s.Throttle = 0
-		old := newConn(1, "closing", s, s.Version())
+		old := newConn(1, "closing", s, s.Version(), 0, "")
 		old.transport = &recordingTransport{updates: make(chan Update, 1)}
 		if err := s.subscribe(old); err != nil {
 			t.Fatal(err)
@@ -958,7 +958,7 @@ func TestReplacementSubscriberFirstFrameCurrentWithPendingPush(t *testing.T) {
 			t.Fatal("pending Push did not start")
 		}
 		updates := make(chan Update, 1)
-		replacement := newConn(2, "replacement", s, 0)
+		replacement := newConn(2, "replacement", s, 0, 0, "")
 		replacement.transport = &recordingTransport{updates: updates}
 		subscribed := make(chan error, 1)
 		go func() {
@@ -994,7 +994,7 @@ func TestSubscribeRefreshErrorDoesNotSubscribe(t *testing.T) {
 	})
 	s.Data = func() (json.RawMessage, error) { return nil, wantErr }
 	s.push.generation.Add(1)
-	c := newConn(1, "failed", s, 0)
+	c := newConn(1, "failed", s, 0, 0, "")
 
 	err := s.subscribe(c)
 	if !errors.Is(err, wantErr) {
