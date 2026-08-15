@@ -211,6 +211,13 @@ func (s *State) invalidateCaches() {
 // disagreement with what the cached path produced. A mismatch means a container
 // handed out a value that was mutated behind its back, which would otherwise
 // surface as clients silently holding stale state.
+//
+// Comparing bytes is right here because both sides come from json.Marshal over
+// the same data, which is deterministic down to map key order. It would stop
+// being right if snapshots were ever assembled from the merkle tree instead:
+// tree nodes are reused on semantic equality, so a reused node can hold
+// stale-but-equivalent bytes — 1 where the state now says 1.0 — and the
+// comparison would have to be semantic rather than byte-for-byte.
 func (s *State) verifyIncremental(cached json.RawMessage) error {
 	s.invalidateCaches()
 	uncached, err := s.Data()

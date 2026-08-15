@@ -464,3 +464,47 @@ func FuzzMalformedState(f *testing.F) {
 		}
 	})
 }
+
+func TestHistoryHandlesRepeatedRootHashes(t *testing.T) {
+	// A state that changes and changes back records the same root hash twice.
+	// The two trees are equal, so either serves — but evicting the first must
+	// not make the second unreachable.
+	start := time.Now()
+	h := newVersionHistory(time.Hour, 1<<20)
+	a := &mnode{hash: [16]byte{1}}
+	b := &mnode{hash: [16]byte{2}}
+	again := &mnode{hash: [16]byte{1}}
+
+	h.record(1, a, 1, start)
+	h.record(2, b, 1, start.Add(time.Second))
+	h.record(3, again, 1, start.Add(2*time.Second))
+
+	if root, ok := h.find(rootHash(a)); !ok || root == nil {
+		t.Fatal("a repeated root hash was not resolvable")
+	}
+	// Age out the first two, leaving only the repeat.
+	h.window = time.Millisecond
+	h.evict(start.Add(time.Minute))
+	if h.len() != 1 {
+		t.Fatalf("history holds %d entries, want 1", h.len())
+	}
+	if _, ok := h.find(rootHash(a)); !ok {
+		t.Fatal("evicting the first occurrence made the surviving one unreachable")
+	}
+	if _, ok := h.find(rootHash(b)); ok {
+		t.Fatal("an evicted root is still resolvable")
+	}
+}
+
+func TestV3RejectsDeleteAgainstAnArrayIndex(t *testing.T) {
+	// Arrays are only ever changed by assignment and truncation, so both
+	// appliers must refuse a delete rather than leaving a hole.
+	var doc any
+	if err := json.Unmarshal([]byte(`{"log":[1,2,3]}`), &doc); err != nil {
+		t.Fatal(err)
+	}
+	_, err := applyOps(doc, []op{{kind: opDel, path: []any{"log", 1}}})
+	if err == nil {
+		t.Fatal("delete against an array index was accepted")
+	}
+}

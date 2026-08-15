@@ -31,9 +31,19 @@ type stateVersion struct {
 // costs only the nodes along the paths that changed to reach it.
 type versionHistory struct {
 	entries  []stateVersion // oldest first
+	index    map[string]*rootRef
 	nodes    int
 	window   time.Duration
 	maxNodes int
+}
+
+// rootRef indexes a retained root by hash. It is reference counted because a
+// state that goes A to B and back to A legitimately records the same hash
+// twice: the two trees are equal, so either serves, but evicting the first must
+// not make the second unreachable.
+type rootRef struct {
+	root *mnode
+	refs int
 }
 
 func newVersionHistory(window time.Duration, maxNodes int) *versionHistory {
@@ -43,7 +53,11 @@ func newVersionHistory(window time.Duration, maxNodes int) *versionHistory {
 	if maxNodes <= 0 {
 		maxNodes = DefaultHistoryMaxNodes
 	}
-	return &versionHistory{window: window, maxNodes: maxNodes}
+	return &versionHistory{
+		index:    map[string]*rootRef{},
+		window:   window,
+		maxNodes: maxNodes,
+	}
 }
 
 // rootHash renders a root as the opaque token clients echo back. Hashes are
@@ -70,6 +84,12 @@ func (h *versionHistory) record(version int64, root *mnode, created int, now tim
 		created: created,
 		at:      now,
 	})
+	ref, ok := h.index[hash]
+	if !ok {
+		ref = &rootRef{root: root}
+		h.index[hash] = ref
+	}
+	ref.refs++
 	h.nodes += created
 	h.evict(now)
 }
@@ -83,22 +103,29 @@ func (h *versionHistory) evict(now time.Time) {
 			return
 		}
 		h.nodes -= oldest.created
+		if ref, ok := h.index[oldest.hash]; ok {
+			ref.refs--
+			if ref.refs <= 0 {
+				delete(h.index, oldest.hash)
+			}
+		}
 		h.entries[0] = stateVersion{}
 		h.entries = h.entries[1:]
 	}
 }
 
-// find returns the retained root for an opaque hash.
+// find returns the retained root for an opaque hash. It is indexed rather than
+// scanned: the window is a duration, so a busy state can hold hundreds of
+// versions, and every push looks up a base for each distinct connection.
 func (h *versionHistory) find(hash string) (*mnode, bool) {
 	if hash == "" {
 		return nil, false
 	}
-	for i := range h.entries {
-		if h.entries[i].hash == hash {
-			return h.entries[i].root, true
-		}
+	ref, ok := h.index[hash]
+	if !ok {
+		return nil, false
 	}
-	return nil, false
+	return ref.root, true
 }
 
 func (h *versionHistory) len() int { return len(h.entries) }

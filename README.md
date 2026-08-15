@@ -179,7 +179,9 @@ each update.
 velox speaks two protocols and negotiates between them, so old and new
 client/server pairings keep working in both directions. A client advertises what
 it wants with the `p` query parameter; anything below 3, including its absence,
-is served v2 exactly as before.
+is served v2 exactly as before. Clients keep both appliers and choose per
+message, so asking for v3 and being answered in v2 -- an older server, or a
+deployment mid-rollout -- is handled rather than an error.
 
 **v2** sends either a full snapshot or an RFC 7386 merge patch, and a patch only
 exists for one version hop. A client that lagged, reconnected or reloaded the
@@ -205,7 +207,19 @@ Operations address one child each:
 
 Path elements are strings for object keys and numbers for array indices, so a
 numeric-looking key never collides with an index. Unlike v2, changing one element
-of an array does not resend the array.
+of an array does not resend the array. Arrays are only ever changed by `s` and
+`n`; a `d` against an array index is invalid and both appliers reject it.
+
+When the operations describing a change would cost more than the subtree they
+patch -- prepending to a long array, say, which shifts every element -- the
+differ sends the subtree instead, so v3 is never much worse than v2 on the shapes
+positional operations handle badly.
+
+A client applies operations only when their `base` matches the root it holds.
+Because hashes are opaque it cannot check anything else, and operations applied
+to the wrong base often succeed. On a mismatch, or any failed operation, it
+discards its document and reconnects for a full snapshot rather than carrying on
+with state it knows is wrong.
 
 Root hashes are **server-internal and opaque**: clients store them and echo them
 back as `h`, and never recompute them. That keeps cross-language JSON

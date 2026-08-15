@@ -170,6 +170,16 @@ console.log("  ok   resync leaves caller-owned $ properties alone");
 
 v2.disconnect();
 
+// Arrays are only ever changed by assignment and truncation; a delete against
+// an index would leave a hole, so it must be refused rather than honoured.
+{
+  const applyOps = require("../client/ops");
+  const doc = {log: [1, 2, 3]};
+  assert.throws(() => applyOps(doc, [["d", ["log", 1]]]), /array index/);
+  assert.deepStrictEqual(doc.log, [1, 2, 3], "a rejected delete still modified the array");
+  console.log("  ok   rejects a delete against an array index");
+}
+
 // A v2 server that predates protocol 3 must still work.
 let legacyDoc = {};
 let v3 = velox.sse(URL, legacyDoc, {retry: false});

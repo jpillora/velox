@@ -12,6 +12,14 @@ import (
 // Building the tree is the diff: a subtree whose bytes are unchanged returns
 // the previous node outright, so it is neither re-walked nor re-validated, and
 // both versions go on sharing it.
+//
+// There is one diff engine, not two. The v2 merge patch is derived from the
+// same tree as the v3 operations — only the walk differs, selected by the
+// differ's arrayOps flag — so supporting both protocols costs one build and two
+// O(changed) walks rather than two full side-by-side diffs. The only part of
+// the original object diff that survives is rawObjectDiff, which v2 still needs
+// for one case the merge patch format cannot otherwise express: replacing an
+// object stored as an opaque leaf. See differ.emitReplacement.
 type mergePatcher struct {
 	prev     []byte
 	tree     *mnode

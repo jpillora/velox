@@ -409,6 +409,13 @@ func applyOp(node any, path []any, o op) (any, error) {
 		if !ok {
 			return nil, errors.New("velox: array index against a non-array")
 		}
+		// Arrays are only ever changed by assignment and truncation. A delete at
+		// an index has no meaning here — removing an element renumbers everything
+		// after it, which the encoder expresses as assignments plus a length —
+		// and honouring one would leave a hole.
+		if o.kind == opDel {
+			return nil, errors.New("velox: delete against an array index")
+		}
 		// One past the end is how a grown array is expressed. Operations are
 		// emitted in ascending index order, so the slot is always reachable.
 		if len(path) == 1 && o.kind == opSet && key == len(elements) {

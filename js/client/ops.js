@@ -53,6 +53,13 @@ module.exports = function applyOps(root, ops) {
       //assigning at the current length is how a grown array is expressed
       parent[last] = op[2];
     } else if (kind === "d") {
+      //Arrays are only ever changed by assignment and truncation. A delete at
+      //an index has no meaning — removing an element renumbers everything after
+      //it, which the encoder expresses as assignments plus a length — and
+      //JavaScript would honour it by leaving a hole rather than refusing.
+      if (Array.isArray(parent)) {
+        throw new Error("velox: delete against an array index");
+      }
       delete parent[last];
     } else {
       throw new Error("velox: unknown operation " + kind);
