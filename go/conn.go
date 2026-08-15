@@ -1,6 +1,7 @@
 package velox
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -184,10 +185,17 @@ func (c *conn) Push() {
 	//choose optimal update (send the smallest)
 	if c.proto >= 3 {
 		update.Root = d.rootHash
-		//a client whose base is still retained gets operations against it,
-		//however many versions behind it has fallen; anything else, including a
-		//base evicted from the history, falls back to the whole document
-		if ops, ok := c.state.opsFor(c.baseHash); ok && len(ops) < len(d.bytes) {
+		//under v3 the root hash, not the version, says where a client is. A state
+		//that changes and changes back returns to a root some client already
+		//holds, and that client needs nothing but the version to catch up —
+		//comparing versions instead would call it stale and resend the document.
+		if c.baseHash != "" && c.baseHash == d.rootHash {
+			update.Base = c.baseHash
+			update.Ops = json.RawMessage(`[]`)
+		} else if ops, ok := c.state.opsFor(c.baseHash); ok && len(ops) < len(d.bytes) {
+			//a client whose base is still retained gets operations against it,
+			//however many versions behind it has fallen; anything else, including
+			//a base evicted from the history, falls back to the whole document
 			update.Base = c.baseHash
 			update.Ops = ops
 		} else {

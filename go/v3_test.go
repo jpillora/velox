@@ -372,3 +372,51 @@ func TestV3GoClientResyncsOnForeignBase(t *testing.T) {
 		}
 	}
 }
+
+// TestV3IdentifiesClientsByRootNotVersion covers a state that changes and
+// changes back. The version counter says the client is two behind; the root
+// hash says it already holds exactly this content. The hash is what counts —
+// trusting the version resends the whole document to a client that needs
+// nothing.
+func TestV3IdentifiesClientsByRootNotVersion(t *testing.T) {
+	state := newV3State()
+	server := httptest.NewServer(velox.SyncHandler(state))
+	defer server.Close()
+
+	initial := readUpdates(t, server.URL+"?p=3", 1)
+	if len(initial) != 1 {
+		t.Fatal("no initial update")
+	}
+	snapshot := initial[0]
+
+	// Away and back again, while this client is not listening.
+	for _, counter := range []int{1, 0} {
+		state.Lock()
+		state.Counter = counter
+		state.Unlock()
+		state.Push()
+		time.Sleep(60 * time.Millisecond)
+	}
+
+	url := fmt.Sprintf("%s?p=3&id=%s&v=%d&h=%s", server.URL, snapshot.ID, snapshot.Version, snapshot.Root)
+	resumed := readUpdates(t, url, 1)
+	if len(resumed) != 1 {
+		t.Fatal("no update after resume")
+	}
+	update := resumed[0]
+
+	if update.Root != snapshot.Root {
+		t.Fatalf("state did not return to its earlier root: %s then %s", snapshot.Root, update.Root)
+	}
+	if len(update.Body) != 0 {
+		t.Fatalf("client already holding root %s was sent a %d byte snapshot", update.Root, len(update.Body))
+	}
+	if string(update.Ops) != "[]" {
+		t.Fatalf("ops = %s, want an empty list", update.Ops)
+	}
+	// The version still has to reach the client, or it reports a stale one
+	// forever and the server keeps scheduling pushes it will never need.
+	if update.Version <= snapshot.Version {
+		t.Fatalf("version = %d, want it advanced past %d", update.Version, snapshot.Version)
+	}
+}
