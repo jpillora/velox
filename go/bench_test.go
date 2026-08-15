@@ -1070,3 +1070,31 @@ func BenchmarkUpdateMarshalEncoder(b *testing.B) {
 		bufferPool.Put(buf)
 	}
 }
+
+// BenchmarkLargeStateRefresh drives State.refresh, which is the production push
+// path: marshal, diff, and publish. The other large-state benchmarks call the
+// patcher directly and so miss everything refresh does around it.
+func BenchmarkLargeStateRefresh(b *testing.B) {
+	fixture := newLargeBenchFixture(b)
+	s := New(fixture.marshal)
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(fixture.unchanged)))
+	b.ResetTimer()
+	changed := true
+	for b.Loop() {
+		b.StopTimer()
+		if changed {
+			fixture.setLeaf(fixture.leafB)
+		} else {
+			fixture.setLeaf(fixture.leafA)
+		}
+		changed = !changed
+		b.StartTimer()
+		if _, err := s.refresh(); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(len(fixture.unchanged)), "state_B/op")
+}

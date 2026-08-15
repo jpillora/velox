@@ -62,10 +62,21 @@ func (m *mergePatcher) update(modifiedJSON []byte, arrayOps bool) (root *mnode, 
 	}
 	// The caller may reuse its marshal buffer, so the snapshot is cloned. Leaves
 	// own their bytes too, leaving the tree independent of both buffers.
+	//
+	// This clone is the state's one authoritative snapshot: State.data.bytes
+	// aliases it rather than taking a second copy. Both are immutable once
+	// published, so the sharing is safe, and it keeps a push from allocating and
+	// copying the whole document twice over.
 	m.prev = bytes.Clone(modifiedJSON)
 	m.tree = root
 	m.created = created
 	return root, ops, nil
+}
+
+// snapshot returns the published state's bytes. Callers must treat it as
+// immutable: State.data.bytes aliases it instead of holding a second copy.
+func (m *mergePatcher) snapshot() []byte {
+	return m.prev
 }
 
 // patch computes an RFC 7386 merge patch from cached previous state to

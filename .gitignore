@@ -3,3 +3,4 @@ sample.txt
 bundle.js.map
 tmp/
 *.out
+*.test

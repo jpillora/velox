@@ -58,9 +58,14 @@ type State struct {
 	//hand out by copy; see deeplyImmutable. Off by default.
 	//
 	//Must be set before SyncHandler, which is where containers are bound and
-	//where this is read. Note that encoding/json still compacts the bytes a
-	//cached container returns, so a push remains O(state) in scanning even when
-	//it re-encodes almost nothing.
+	//where this is read.
+	//
+	//It saves encoding work, not scanning work. encoding/json compacts whatever
+	//a MarshalJSON returns and copies it into a fresh full-size buffer, so a
+	//push stays O(state) in scanning however little it re-encodes: profiling the
+	//incremental path puts 80.8% of it in encoding/json.appendCompact. Removing
+	//that needs velox to own snapshot assembly rather than delegating to
+	//json.Marshal, which is a larger change than this flag.
 	Incremental bool `json:"-"`
 	//VerifyIncremental re-marshals the whole state on every push with every
 	//cache invalidated and fails the push if the result differs. It exists
@@ -135,10 +140,12 @@ func (s *State) init() error {
 	b, err := s.Data()
 	// set data fields
 	s.data.mut.Lock()
-	// seed the merge patcher cache with the initial state
+	// seed the merge patcher cache with the initial state. The patcher clones
+	// the bytes it is handed, so the snapshot published below aliases that clone
+	// rather than making a second one.
 	if err == nil {
-		b = bytes.Clone(b)
 		_, err = s.data.patcher.patch(b)
+		b = s.data.patcher.snapshot()
 	}
 	seeded := err == nil
 	if err != nil {
@@ -512,7 +519,7 @@ func (s *State) refresh() (changed bool, err error) {
 			// Clients have no document to patch after a null state. Publish the
 			// restored object as a full snapshot, even if it matches the cache
 			// from before the clear.
-			s.data.bytes = bytes.Clone(newBytes)
+			s.data.bytes = s.data.patcher.snapshot()
 			s.data.delta = nil
 			s.data.cleared = false
 			changed = true
@@ -526,7 +533,7 @@ func (s *State) refresh() (changed bool, err error) {
 				// then calculate change set from last version
 				// NOTE: patch may contain references to localStruct
 				s.data.delta = delta
-				s.data.bytes = bytes.Clone(newBytes)
+				s.data.bytes = s.data.patcher.snapshot()
 				changed = true
 				if s.Debug {
 					log.Printf("velox: gopush changed, delta=%s", string(delta))
