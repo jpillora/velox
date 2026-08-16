@@ -271,6 +271,29 @@ cache.
 - JS object properties beginning with `$` will be ignored to play nice with Angular.
 - JS object with an `$apply` function will automatically be called on each update to play nice with Angular.
 
+### Changelog
+
+**[v0.10.0](https://github.com/jpillora/velox/releases/tag/v0.10.0)** — protocol v3: merkle-tree state sync
+
+- A merkle tree over the state's encoded form shares unchanged subtrees between
+  versions, so recent history is cheap to retain and a patch can span any two
+  retained versions
+- Reconnects and page reloads resume with one small patch, however many
+  versions were missed (`HistoryWindow`, default 5m)
+- Per-element array operations, with an insertion or deletion anywhere in an
+  array travelling as a single splice
+- Opt-in browser persistence: a reload resumes from local storage
+- Client-added properties survive updates; a diverged client resyncs with a
+  fresh snapshot instead of carrying wrong state
+- Both servers rebuilt around windowed diffing — a push scans only the byte
+  range that changed. On the ~340KB benchmark fixture: Go small-delta diff
+  5.25ms → 0.23ms, Node push pipeline 5.6ms → 1.3ms, Node history memory
+  366KB → 9KB per retained version
+- v2 (RFC 7386 merge patch) negotiated automatically for older clients and
+  servers, in both directions
+
+Earlier versions are on the [releases page](https://github.com/jpillora/velox/releases).
+
 #### MIT License
 
 Copyright © 2018 Jaime Pillora &lt;dev@jpillora.com&gt;
