@@ -337,19 +337,26 @@ function buildAt(prev, prevBuf, pa, pb, buf, a, b, leafSize, stats, win, specula
 //suffix child (or on the level's closing bracket). Any structural surprise
 //returns null and the caller rescans the whole level.
 function scanUnitsBetween(buf, u, v, hasBefore, hasAfter, parseUnit) {
+  //whatever ends the gap must be the suffix separator or a closing bracket;
+  //scanValue balances bracket types interchangeably, so without this check a
+  //{...] mismatch could pass as an empty level
+  const closes = () =>
+    hasAfter ? buf[v] === COMMA : buf[v] === CLOSE_BRACE || buf[v] === CLOSE_BRACKET;
   const units = [];
   let pos = u;
   if (hasBefore) {
     if (pos === v) {
       //u and v coincide: the shared separator between the prefix and suffix
       //children, or the closing bracket — no window children at all
-      return units;
+      return closes() ? units : null;
     }
     if (buf[pos] !== COMMA) return null;
     pos++;
     if (pos >= v) return null; //",," or ",]" — not valid JSON
   } else if (pos === v) {
-    return units; //empty level, or every child sits in the suffix
+    //nothing before the suffix separator: valid only when the level genuinely
+    //ends here, else the byte at v is a dangling separator
+    return hasAfter || !closes() ? null : units;
   }
   for (;;) {
     const unit = parseUnit(buf, pos);

@@ -45,6 +45,12 @@ type mnode struct {
 	raw  []byte   // leaf only: owned copy of the encoded value
 	keys []string // object only, sorted so key order cannot affect the hash
 	kids []*mnode // object and array only
+	// order records an object level's document order as (sorted-index,
+	// quoted-key-byte-length) pairs, which is what lets the next build
+	// reconstruct this level's spans without rescanning the snapshot. It is
+	// nil when duplicate keys were seen, whose collapsed map no longer mirrors
+	// the document's physical layout. The hash deliberately ignores it.
+	order []uint32
 }
 
 // separators counts the commas joining n children.
@@ -147,123 +153,147 @@ func checkJSONRootObject(data []byte) error {
 	return nil
 }
 
-// objectLevel is one decoded object level: sorted keys with duplicates already
-// resolved last-wins, matching encoding/json's own decoding behaviour.
-type objectLevel struct {
-	keys   []string
-	values map[string]json.RawMessage
-}
-
-func scanObjectLevel(data []byte) (*objectLevel, error) {
-	values, err := rawObject(data)
-	if err != nil {
-		return nil, err
-	}
-	level := &objectLevel{keys: make([]string, 0, len(values)), values: values}
-	for key := range values {
-		level.keys = append(level.keys, key)
-	}
-	slices.Sort(level.keys)
-	return level, nil
-}
-
-// scanArrayLevel splits one array level into its elements without decoding them.
-func scanArrayLevel(data []byte) ([]json.RawMessage, error) {
-	i := skipJSONSpace(data, 0)
-	if i >= len(data) || data[i] != '[' {
-		return nil, errors.New("invalid JSON array")
-	}
-	i = skipJSONSpace(data, i+1)
-	if i < len(data) && data[i] == ']' {
-		return []json.RawMessage{}, nil
-	}
-	var elements []json.RawMessage
-	for {
-		if i >= len(data) {
-			return nil, errors.New("invalid JSON array")
-		}
-		end := scanJSONValue(data, i)
-		// As in rawObject: an empty span is a missing element, not a value.
-		if end == i {
-			return nil, errors.New("invalid JSON array")
-		}
-		elements = append(elements, data[i:end])
-		i = skipJSONSpace(data, end)
-		if i < len(data) && data[i] == ']' {
-			return elements, nil
-		}
-		if i >= len(data) || data[i] != ',' {
-			return nil, errors.New("invalid JSON array")
-		}
-		i = skipJSONSpace(data, i+1)
-	}
-}
-
-// merkleBuilder builds a new tree against the previous one. Building is the
-// diff: a subtree whose bytes are unchanged returns the previous node outright,
+// merkleBuilder builds a new tree against the previous one, working in
+// absolute offsets over the two snapshots' buffers. Building is the diff: a
+// subtree whose bytes are unchanged returns the previous node outright,
 // costing no allocation and no hashing, and is thereafter shared by both
-// versions.
+// versions. With a window set, subtrees provably outside the changed byte
+// range reuse by offset arithmetic alone.
 type merkleBuilder struct {
 	leafSize int
 	created  int // nodes allocated this build, used as a history eviction credit
+	prevBuf  []byte
+	newBuf   []byte
+	win      *diffWindow // nil scans everything
+	// inexact records that a leaf was reused on semantic rather than byte
+	// equality, leaving its recorded size out of step with the snapshot; span
+	// arithmetic is then off the table for every later build over this tree.
+	inexact bool
 }
 
-func (b *merkleBuilder) build(prev *mnode, prevRaw, newRaw json.RawMessage) (*mnode, error) {
-	if prev != nil && prevRaw != nil && bytes.Equal(prevRaw, newRaw) {
+// build constructs the node for newBuf[na:nb) against prev at prevBuf[pa:pb),
+// pa < 0 meaning no previous bytes. speculative marks a span that is an
+// arithmetic guess: it must be proven, never plain-scanned.
+func (bld *merkleBuilder) build(prev *mnode, pa, pb, na, nb int, speculative bool) (*mnode, error) {
+	if prev != nil && pa >= 0 &&
+		(bld.win.reusableOutsideWindow(pa, pb, na, nb) ||
+			(pb-pa == nb-na && bytes.Equal(bld.prevBuf[pa:pb], bld.newBuf[na:nb]))) {
 		return prev, nil
 	}
-	if len(newRaw) >= b.leafSize {
-		switch firstJSONByte(newRaw) {
+	if nb-na >= bld.leafSize {
+		switch bld.newBuf[na] {
 		case '{':
-			return b.buildObject(prev, prevRaw, newRaw)
+			return bld.buildObject(prev, pa, pb, na, nb, speculative)
 		case '[':
-			return b.buildArray(prev, prevRaw, newRaw)
+			return bld.buildArray(prev, pa, pb, na, nb, speculative)
 		}
 	}
-	return b.buildLeaf(prev, newRaw)
+	return bld.buildLeaf(prev, na, nb, speculative)
 }
 
 // buildLeaf validates only the bytes it is handed. Bytes that matched the
 // previous snapshot never reach here, so number-range validation covers the
 // whole document across pushes while only ever scanning what changed.
-func (b *merkleBuilder) buildLeaf(prev *mnode, newRaw json.RawMessage) (*mnode, error) {
+func (bld *merkleBuilder) buildLeaf(prev *mnode, na, nb int, speculative bool) (*mnode, error) {
+	// a guessed span is only a leaf if its bytes really are one value ending
+	// exactly where the guess says — this scan is the speculation's proof, and
+	// it is small because leaves sit below the threshold
+	if speculative && scanJSONValue(bld.newBuf, na) != nb {
+		return nil, errWindowAbort
+	}
+	newRaw := json.RawMessage(bld.newBuf[na:nb])
 	if err := validateJSONLeaf(newRaw); err != nil {
+		if speculative {
+			return nil, errWindowAbort
+		}
 		return nil, err
 	}
 	if prev != nil && prev.kind == kindLeaf {
 		equal, err := rawSemanticEqual(prev.raw, newRaw)
 		if err != nil {
+			if speculative {
+				return nil, errWindowAbort
+			}
 			return nil, err
 		}
 		if equal {
+			if !bytes.Equal(prev.raw, newRaw) {
+				bld.inexact = true
+			}
 			return prev, nil
 		}
 	}
-	node := &mnode{kind: kindLeaf, raw: bytes.Clone(newRaw), size: len(newRaw)}
+	node := &mnode{kind: kindLeaf, raw: bytes.Clone(newRaw), size: nb - na}
 	node.rehash()
-	b.created++
+	bld.created++
 	return node, nil
 }
 
-func (b *merkleBuilder) buildObject(prev *mnode, prevRaw, newRaw json.RawMessage) (*mnode, error) {
-	level, err := scanObjectLevel(newRaw)
-	if err != nil {
-		return nil, err
-	}
+func (bld *merkleBuilder) buildObject(prev *mnode, pa, pb, na, nb int, speculative bool) (*mnode, error) {
 	prevIsObject := prev != nil && prev.kind == kindObject
-	// The previous level is only ever consulted by key, so rawObject suffices;
-	// scanObjectLevel would sort a key list nothing reads.
-	var prevValues rawObjectMap
-	if prevIsObject && prevRaw != nil {
-		if prevValues, err = rawObject(prevRaw); err != nil {
+	// the previous level's entries reconstruct arithmetically from the node's
+	// recorded order and sizes; scanning the previous snapshot is the fallback
+	var prevList []objEntry
+	if prevIsObject && pa >= 0 && bld.prevBuf[pa] == '{' {
+		prevList = prevObjectSpansOf(prev, pa, pb)
+		if prevList == nil {
+			var err error
+			if prevList, err = scanObjectEntriesAt(bld.prevBuf, pa); err != nil {
+				return nil, err
+			}
+		}
+	}
+	var entries []objEntry
+	specKey, hasSpec := "", false
+	if bld.win != nil && prevList != nil && prev.order != nil {
+		entries, specKey, hasSpec, _ = deriveObjectEntries(bld.newBuf, prevList, na, nb, bld.win)
+	}
+	if entries == nil {
+		// a plain scan inside a guessed span could accept a wrong region, so a
+		// failed derivation under speculation abandons the windowed build
+		if speculative {
+			return nil, errWindowAbort
+		}
+		var err error
+		if entries, err = scanObjectEntriesAt(bld.newBuf, na); err != nil {
 			return nil, err
 		}
 	}
+	// duplicates resolve last-wins, matching encoding/json; the value being
+	// dropped never reaches a leaf, so its well-formedness is checked here
+	byName := make(map[string]objEntry, len(entries))
+	dups := false
+	for _, e := range entries {
+		if old, ok := byName[e.key]; ok {
+			dups = true
+			if !json.Valid(bld.newBuf[old.vs:old.ve]) {
+				return nil, errors.New("invalid JSON object")
+			}
+		}
+		byName[e.key] = e
+	}
+	var prevSpanByKey map[string][2]int
+	if prevList != nil {
+		prevSpanByKey = make(map[string][2]int, len(prevList))
+		for _, e := range prevList {
+			prevSpanByKey[e.key] = [2]int{e.vs, e.ve}
+		}
+	}
+	keys := make([]string, 0, len(byName))
+	for key := range byName {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
 
-	node := &mnode{kind: kindObject, keys: level.keys, kids: make([]*mnode, len(level.keys)), size: len(newRaw)}
-	shared := prevIsObject && len(prev.keys) == len(level.keys)
-	for i, key := range level.keys {
-		kid, err := b.build(prev.kidByKey(key), prevValues[key], level.values[key])
+	node := &mnode{kind: kindObject, keys: keys, kids: make([]*mnode, len(keys)), size: nb - na}
+	shared := prevIsObject && len(prev.keys) == len(keys)
+	for i, key := range keys {
+		e := byName[key]
+		pvs, pve := -1, -1
+		if ps, ok := prevSpanByKey[key]; ok {
+			pvs, pve = ps[0], ps[1]
+		}
+		kid, err := bld.build(prev.kidByKey(key), pvs, pve, e.vs, e.ve, hasSpec && key == specKey)
 		if err != nil {
 			return nil, err
 		}
@@ -275,36 +305,61 @@ func (b *merkleBuilder) buildObject(prev *mnode, prevRaw, newRaw json.RawMessage
 	if shared {
 		return prev, nil
 	}
+	if !dups {
+		node.order = make([]uint32, 0, len(entries)*2)
+		for _, e := range entries {
+			idx, _ := slices.BinarySearch(keys, e.key)
+			node.order = append(node.order, uint32(idx), uint32(e.klen))
+		}
+	}
 	node.rehash()
-	b.created++
+	bld.created++
 	return node, nil
 }
 
-func (b *merkleBuilder) buildArray(prev *mnode, prevRaw, newRaw json.RawMessage) (*mnode, error) {
-	elements, err := scanArrayLevel(newRaw)
-	if err != nil {
-		return nil, err
-	}
+func (bld *merkleBuilder) buildArray(prev *mnode, pa, pb, na, nb int, speculative bool) (*mnode, error) {
 	prevIsArray := prev != nil && prev.kind == kindArray
-	var prevElements []json.RawMessage
-	if prevIsArray && prevRaw != nil {
-		if prevElements, err = scanArrayLevel(prevRaw); err != nil {
+	var prevSpans [][2]int
+	if prevIsArray && pa >= 0 && bld.prevBuf[pa] == '[' {
+		prevSpans = prevArraySpansOf(prev, pa, pb)
+		if prevSpans == nil {
+			var err error
+			if prevSpans, err = scanArraySpansAt(bld.prevBuf, pa); err != nil {
+				return nil, err
+			}
+		}
+	}
+	var spans [][2]int
+	var pairing []int
+	specIndex := -1
+	if bld.win != nil && prevSpans != nil {
+		spans, pairing, specIndex, _ = deriveArraySpans(bld.newBuf, prevSpans, na, nb, bld.win)
+	}
+	if spans == nil {
+		if speculative {
+			return nil, errWindowAbort
+		}
+		var err error
+		if spans, err = scanArraySpansAt(bld.newBuf, na); err != nil {
 			return nil, err
 		}
 	}
-
-	node := &mnode{kind: kindArray, kids: make([]*mnode, len(elements)), size: len(newRaw)}
-	shared := prevIsArray && len(prev.kids) == len(elements)
-	for i, element := range elements {
+	node := &mnode{kind: kindArray, kids: make([]*mnode, len(spans)), size: nb - na}
+	shared := prevIsArray && len(prev.kids) == len(spans)
+	for i, span := range spans {
+		pi := i
+		if pairing != nil {
+			pi = pairing[i]
+		}
 		var prevKid *mnode
-		var prevKidRaw json.RawMessage
-		if prevIsArray && i < len(prev.kids) {
-			prevKid = prev.kids[i]
+		pvs, pve := -1, -1
+		if prevIsArray && pi >= 0 && pi < len(prev.kids) {
+			prevKid = prev.kids[pi]
 		}
-		if i < len(prevElements) {
-			prevKidRaw = prevElements[i]
+		if prevSpans != nil && pi >= 0 && pi < len(prevSpans) {
+			pvs, pve = prevSpans[pi][0], prevSpans[pi][1]
 		}
-		kid, err := b.build(prevKid, prevKidRaw, element)
+		kid, err := bld.build(prevKid, pvs, pve, span[0], span[1], i == specIndex)
 		if err != nil {
 			return nil, err
 		}
@@ -317,7 +372,7 @@ func (b *merkleBuilder) buildArray(prev *mnode, prevRaw, newRaw json.RawMessage)
 		return prev, nil
 	}
 	node.rehash()
-	b.created++
+	bld.created++
 	return node, nil
 }
 

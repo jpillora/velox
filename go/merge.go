@@ -31,6 +31,13 @@ type mergePatcher struct {
 	// whole document per push. A caller-supplied MarshalFunc may reuse its
 	// buffer, so anything else still takes the defensive copy.
 	ownsInput bool
+	// spansInexact records that some retained node was reused on semantic
+	// rather than byte equality — a marshaller that re-encodes equal values
+	// differently — leaving node sizes out of step with the snapshot. Span
+	// arithmetic, and with it the windowed build, is then disabled for good:
+	// stale nodes stay shared into every later tree. encoding/json never
+	// triggers this, since its output is deterministic.
+	spansInexact bool
 }
 
 func (m *mergePatcher) builder() merkleBuilder {
@@ -42,19 +49,56 @@ func (m *mergePatcher) builder() merkleBuilder {
 }
 
 // build derives the tree for modifiedJSON without publishing anything. A null
-// state has no tree; every other state must be a JSON object, which the object
-// scan enforces.
+// state has no tree; every other state must be a JSON object.
+//
+// With a previous snapshot in hand it first attempts the windowed build: one
+// chunked comparison finds the byte range the snapshots can differ in, and the
+// build scans only inside it, reusing everything else by offset arithmetic.
+// Speculation that fails to verify — and any input the fast paths cannot
+// vouch for — aborts to the plain path below, whose validation also rejects
+// anything that is not exactly one object.
 func (m *mergePatcher) build(modifiedJSON []byte) (*mnode, int, error) {
 	if isJSONNull(modifiedJSON) {
 		return nil, 0, nil
+	}
+	if m.tree != nil && m.prev != nil && !m.spansInexact {
+		if na, nb, ok := rootSpanOf(modifiedJSON); ok {
+			if pa, pb, ok2 := rootSpanOf(m.prev); ok2 {
+				win := makeWindow(m.prev, modifiedJSON)
+				builder := m.builder()
+				builder.prevBuf, builder.newBuf, builder.win = m.prev, modifiedJSON, &win
+				// The root is built speculatively: its span came from trimming,
+				// not scanning, so the level must derive — a plain scan here
+				// would stop at the first balanced brace and quietly accept
+				// trailing junk that checkJSONRootObject exists to reject.
+				root, err := builder.buildObject(m.tree, pa, pb, na, nb, true)
+				if err != errWindowAbort {
+					if err == nil && builder.inexact {
+						m.spansInexact = true
+					}
+					return root, builder.created, err
+				}
+			}
+		}
 	}
 	if err := checkJSONRootObject(modifiedJSON); err != nil {
 		return nil, 0, err
 	}
 	builder := m.builder()
+	builder.prevBuf, builder.newBuf = m.prev, modifiedJSON
+	na := skipJSONSpace(modifiedJSON, 0)
+	nb := scanJSONValue(modifiedJSON, na)
+	pa, pb := -1, -1
+	if m.prev != nil {
+		pa = skipJSONSpace(m.prev, 0)
+		pb = scanJSONValue(m.prev, pa)
+	}
 	// The root is always expanded, however small it is, so that top-level keys
 	// stay individually addressable.
-	root, err := builder.buildObject(m.tree, m.prev, modifiedJSON)
+	root, err := builder.buildObject(m.tree, pa, pb, na, nb, false)
+	if err == nil && builder.inexact {
+		m.spansInexact = true
+	}
 	return root, builder.created, err
 }
 

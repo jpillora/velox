@@ -1,0 +1,4 @@
+go test fuzz v1
+string("{\"x\":[0,2,3]}")
+string("{\"log\":[1,0,3]}")
+string("{\"log\":[,3]}")

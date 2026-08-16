@@ -14,12 +14,13 @@ import (
 // previous (tree, bytes) pair so tests can assert node sharing across versions.
 func buildTree(t *testing.T, leafSize int, prev *mnode, prevRaw, doc string) *mnode {
 	t.Helper()
-	builder := &merkleBuilder{leafSize: leafSize}
-	var previous json.RawMessage
+	builder := &merkleBuilder{leafSize: leafSize, newBuf: []byte(doc)}
+	pa, pb := -1, -1
 	if prevRaw != "" {
-		previous = json.RawMessage(prevRaw)
+		builder.prevBuf = []byte(prevRaw)
+		pa, pb = 0, len(prevRaw)
 	}
-	root, err := builder.buildObject(prev, previous, json.RawMessage(doc))
+	root, err := builder.buildObject(prev, pa, pb, 0, len(doc), false)
 	if err != nil {
 		t.Fatalf("build %s: %v", doc, err)
 	}
@@ -61,13 +62,13 @@ func TestMerkleBuildOnlyAllocatesChangedPaths(t *testing.T) {
 	keys[7] = `"k07":{"v":999,"pad":"aaaaaaaaaaaaaaaa"}`
 	after := "{" + strings.Join(keys, ",") + "}"
 
-	first := &merkleBuilder{leafSize: 8}
-	root, err := first.buildObject(nil, nil, json.RawMessage(before))
+	first := &merkleBuilder{leafSize: 8, newBuf: []byte(before)}
+	root, err := first.buildObject(nil, -1, -1, 0, len(before), false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second := &merkleBuilder{leafSize: 8}
-	if _, err := second.buildObject(root, json.RawMessage(before), json.RawMessage(after)); err != nil {
+	second := &merkleBuilder{leafSize: 8, prevBuf: []byte(before), newBuf: []byte(after)}
+	if _, err := second.buildObject(root, 0, len(before), 0, len(after), false); err != nil {
 		t.Fatal(err)
 	}
 	// The whole document costs many nodes; changing one leaf must cost only the
@@ -561,4 +562,74 @@ func TestV3RejectsDeleteAgainstAnArrayIndex(t *testing.T) {
 	if err == nil {
 		t.Fatal("delete against an array index was accepted")
 	}
+}
+
+// FuzzV3Sequence drives one patcher through a chain of documents and holds the
+// windowed incremental build to a from-scratch build at every step. The trees
+// must be semantically indistinguishable — the differ itself is the judge —
+// and the emitted operations must carry each version to the next. The seeds
+// include the two speculation bugs the JavaScript differential test caught
+// before this port: a boundary insertion misread as containment, and a prepend
+// whose inserted bytes made a wrong guessed span parse as valid JSON.
+func FuzzV3Sequence(f *testing.F) {
+	seeds := [][3]string{
+		{`{"a":1}`, `{"a":1,"b":{"c":[1,2]}}`, `{"a":2,"b":{"c":[1,2]}}`},
+		{`{"k1":[[],{"k4":true},["s58"]]}`, `{"k1":[["s11",28,false,886],[],{"k4":true},["s58"]]}`, `{"k1":[]}`},
+		{`{"users":[1,2,3,4,5],"z":1}`, `{"users":[1,2,9,4,5],"z":1}`, `{"users":[1,2,9,4,5,6],"z":2}`},
+		{`{"a":{"b":"x"}}`, `{"a":{"b":"y"}}`, `{"a":{"b":"y","c":1}}`},
+		{`{"a":1,"a":2}`, `{"a":3}`, `{"a":3,"b":[1]}`},
+		{`{"s":"abc"}`, `{"s":"ab\"c]}{["}`, `{"s":""}`},
+		{`{"n":1}`, `{"n":1.0}`, `{"n":2}`},
+		{`{"log":[1,2,3]}`, `{"log":[9,1,2,3]}`, `{"log":[9,3]}`},
+		{`{"a":[{"deep":[1,2]}]}`, `{"a":[{"deep":[1,2,3]}]}`, `{"a":[{"deep":[]}]}`},
+		{`{"a":1}`, `{"a":1}}`, `{"a":2}`},
+		{`{"a":1}`, `{"a":1}{"b":2}`, `{"a":2}`},
+	}
+	for _, s := range seeds {
+		f.Add(s[0], s[1], s[2])
+	}
+	f.Fuzz(func(t *testing.T, d1, d2, d3 string) {
+		for _, leafSize := range []int{1, 24, 512} {
+			patcher := &mergePatcher{leafSize: leafSize}
+			var prevDoc []byte
+			for _, doc := range []string{d1, d2, d3} {
+				data := []byte(doc)
+				if isJSONNull(data) {
+					continue
+				}
+				hadPrev := patcher.prev != nil
+				prevTree := patcher.tree
+				root, ops, err := patcher.update(data, true)
+				if err != nil {
+					// rejection behaviour belongs to FuzzMalformedState
+					continue
+				}
+				scratch := &mergePatcher{leafSize: leafSize}
+				sroot, _, serr := scratch.build(data)
+				if serr != nil {
+					t.Fatalf("leaf %d: incremental accepted %q, scratch rejects it: %v", leafSize, doc, serr)
+				}
+				if (root == nil) != (sroot == nil) {
+					t.Fatalf("leaf %d: incremental/scratch nil mismatch for %q", leafSize, doc)
+				}
+				if root != nil {
+					disagreement, derr := diffTrees(sroot, root, true)
+					if derr != nil || len(disagreement) != 0 {
+						t.Fatalf("leaf %d: incremental tree diverged from scratch for %q: ops=%v err=%v", leafSize, doc, disagreement, derr)
+					}
+				}
+				if hadPrev && prevTree != nil && root != nil && prevDoc != nil {
+					var target, want any
+					if json.Unmarshal(prevDoc, &target) != nil || json.Unmarshal(data, &want) != nil {
+						t.Fatalf("leaf %d: accepted state %q does not decode", leafSize, doc)
+					}
+					got, aerr := applyOps(target, ops)
+					if aerr != nil || !valueEqual(got, want) {
+						t.Fatalf("leaf %d: ops from %q to %q did not reproduce the document: %v (ops %v)", leafSize, prevDoc, doc, aerr, ops)
+					}
+				}
+				prevDoc = data
+			}
+		}
+	})
 }
