@@ -209,12 +209,16 @@ func (c *conn) Push() {
 		} else {
 			update.Body = d.bytes
 		}
-	} else if d.delta != nil &&
-		c.Version() == (d.version-1) &&
-		len(d.bytes) > 0 &&
-		len(d.delta) < len(d.bytes) {
-		update.Delta = true
-		update.Body = d.delta
+	} else if c.Version() == (d.version-1) && len(d.bytes) > 0 {
+		//the v2 projection is computed on first use and memoised; a nil delta
+		//means there is no expressible patch and the snapshot goes instead
+		if delta := c.state.deltaFor(); delta != nil && len(delta) < len(d.bytes) {
+			update.Delta = true
+			update.Body = delta
+		} else {
+			update.Delta = false
+			update.Body = d.bytes
+		}
 	} else {
 		update.Delta = false
 		update.Body = d.bytes

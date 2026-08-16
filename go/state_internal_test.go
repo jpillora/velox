@@ -74,8 +74,8 @@ func TestRefreshChangedStateUpdatesDataAndCache(t *testing.T) {
 	if !bytes.Equal(s.data.bytes, changed) {
 		t.Fatalf("cached bytes = %s, want %s", s.data.bytes, changed)
 	}
-	if !bytes.Equal(s.data.delta, []byte(`{"value":"after"}`)) {
-		t.Fatalf("delta = %s, want changed value", s.data.delta)
+	if delta := s.deltaFor(); !bytes.Equal(delta, []byte(`{"value":"after"}`)) {
+		t.Fatalf("delta = %s, want changed value", delta)
 	}
 	if s.data.version != 8 {
 		t.Fatalf("version = %d, want 8", s.data.version)
@@ -108,8 +108,8 @@ func TestRefreshOwnsMarshalBufferSnapshots(t *testing.T) {
 	if !bytes.Equal(s.data.bytes, []byte(`{"value":"B"}`)) {
 		t.Fatalf("cached bytes = %s, want value B", s.data.bytes)
 	}
-	if !bytes.Equal(s.data.delta, []byte(`{"value":"B"}`)) {
-		t.Fatalf("delta = %s, want value B", s.data.delta)
+	if delta := s.deltaFor(); !bytes.Equal(delta, []byte(`{"value":"B"}`)) {
+		t.Fatalf("delta = %s, want value B", delta)
 	}
 	if s.data.version != 2 {
 		t.Fatalf("version = %d, want 2", s.data.version)
@@ -208,8 +208,8 @@ func TestRefreshNilBytesStillSeedsAndPatches(t *testing.T) {
 	if !bytes.Equal(s.data.bytes, []byte(`{}`)) {
 		t.Fatalf("cached bytes = %s, want {}", s.data.bytes)
 	}
-	if !bytes.Equal(s.data.delta, []byte(`{"old":null}`)) {
-		t.Fatalf("delta = %s, want key deletion", s.data.delta)
+	if delta := s.deltaFor(); !bytes.Equal(delta, []byte(`{"old":null}`)) {
+		t.Fatalf("delta = %s, want key deletion", delta)
 	}
 	if s.data.version != 8 {
 		t.Fatalf("version = %d, want 8", s.data.version)

@@ -93,6 +93,7 @@ type State struct {
 		cleared  bool            // clients hold no document: state was null or never published
 		patcher  mergePatcher    // owns the raw previous state and its merkle tree
 		root     *mnode          // merkle root for the published state, nil when cleared
+		prevRoot *mnode          // root at version-1, the base deltaFor projects from
 		rootHash string          // opaque resume token for root
 		history  *versionHistory // recent roots, so lagging clients get a patch
 		// patchCache memoises v3 operation payloads by the base tree they apply
@@ -544,8 +545,13 @@ func (s *State) refresh() (changed bool, err error) {
 			log.Printf("velox: gopush no change detected")
 		}
 	} else {
-		// steps to go from local to remote, capture changes
-		delta, err := s.data.patcher.patch(newBytes)
+		// Advancing the tree is the diff: reused nodes mean equality. Neither
+		// protocol's patch is walked here — v3 operations come from opsFor and
+		// the v2 projection from deltaFor, each on demand and memoised — so a
+		// push pays for the build alone.
+		hadPrev := s.data.patcher.prev != nil
+		prevTree := s.data.patcher.tree
+		root, err := s.data.patcher.advance(newBytes)
 		if err != nil {
 			return false, fmt.Errorf("create-patch: %w", err)
 		}
@@ -556,22 +562,23 @@ func (s *State) refresh() (changed bool, err error) {
 			// from before the clear.
 			s.data.bytes = s.data.patcher.snapshot()
 			s.data.delta = nil
+			s.data.prevRoot = nil
 			s.data.cleared = false
 			changed = true
 		} else {
-			// ensure non-nil after the patch has been validated
+			// ensure non-nil after the new state has been validated
 			if s.data.bytes == nil {
 				s.data.bytes = []byte(`{}`)
 			}
-			// if changed,
-			if !bytes.Equal(delta, []byte(`{}`)) && len(delta) > 0 {
-				// then calculate change set from last version
-				// NOTE: patch may contain references to localStruct
-				s.data.delta = delta
+			// A changed state builds a new root; a semantically-equal one, even
+			// re-encoded, reuses the previous node by pointer.
+			if hadPrev && root != prevTree {
+				s.data.delta = nil
+				s.data.prevRoot = prevTree
 				s.data.bytes = s.data.patcher.snapshot()
 				changed = true
 				if s.Debug {
-					log.Printf("velox: gopush changed, delta=%s", string(delta))
+					log.Printf("velox: gopush changed, version=%d", s.data.version+1)
 				}
 			} else if s.Debug {
 				log.Printf("velox: gopush no change detected")
@@ -614,7 +621,40 @@ func (s *State) publishTree(record bool) {
 func (s *State) clearTree() {
 	s.data.root = nil
 	s.data.rootHash = ""
+	s.data.prevRoot = nil
 	s.discardPatchCache()
+}
+
+// deltaFor returns the RFC 7386 merge patch carrying version-1 to the current
+// version, computed on first use and memoised until the next publish. Pushes
+// used to walk this projection eagerly whether or not any v2 client was
+// connected; now a v3-only fleet never pays for it, and it runs outside the
+// write-locked section either way. The caller must hold data.mut for reading.
+func (s *State) deltaFor() []byte {
+	s.data.patchMut.Lock()
+	defer s.data.patchMut.Unlock()
+	if s.data.delta != nil {
+		return s.data.delta
+	}
+	if s.data.prevRoot == nil || s.data.root == nil {
+		return nil
+	}
+	ops, err := diffTrees(s.data.prevRoot, s.data.root, false)
+	if err != nil {
+		if s.Debug {
+			log.Printf("velox: v2 delta failed: %s", err)
+		}
+		return nil
+	}
+	delta, err := mergePatchFromOps(ops)
+	if err != nil {
+		if s.Debug {
+			log.Printf("velox: v2 delta failed: %s", err)
+		}
+		return nil
+	}
+	s.data.delta = delta
+	return delta
 }
 
 func (s *State) discardPatchCache() {

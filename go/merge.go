@@ -58,21 +58,17 @@ func (m *mergePatcher) build(modifiedJSON []byte) (*mnode, int, error) {
 	return root, builder.created, err
 }
 
-// update refreshes the tree from modifiedJSON and returns the operations that
-// carry the previous state to it. The cache is published only after every
-// fallible step has succeeded, so a rejected state leaves the patcher untouched.
-func (m *mergePatcher) update(modifiedJSON []byte, arrayOps bool) (root *mnode, ops []op, err error) {
+// advance refreshes the tree from modifiedJSON without walking a diff, which
+// is all a push needs up front: both protocols' patches are derived from the
+// trees on demand. The cache is published only after every fallible step has
+// succeeded, so a rejected state leaves the patcher untouched.
+func (m *mergePatcher) advance(modifiedJSON []byte) (*mnode, error) {
 	if m.prev != nil && bytes.Equal(m.prev, modifiedJSON) {
-		return m.tree, nil, nil
+		return m.tree, nil
 	}
 	root, created, err := m.build(modifiedJSON)
 	if err != nil {
-		return nil, nil, err
-	}
-	if m.prev != nil {
-		if ops, err = diffTrees(m.tree, root, arrayOps); err != nil {
-			return nil, nil, err
-		}
+		return nil, err
 	}
 	// This becomes the state's one authoritative snapshot: State.data.bytes
 	// aliases it rather than taking a second copy. Both are immutable once
@@ -86,6 +82,28 @@ func (m *mergePatcher) update(modifiedJSON []byte, arrayOps bool) (root *mnode, 
 	}
 	m.tree = root
 	m.created = created
+	return root, nil
+}
+
+// update advances the tree and returns the operations carrying the previous
+// state to it, restoring the patcher wholesale if the diff itself fails so a
+// rejected transition never leaves a half-published cache.
+func (m *mergePatcher) update(modifiedJSON []byte, arrayOps bool) (*mnode, []op, error) {
+	if m.prev != nil && bytes.Equal(m.prev, modifiedJSON) {
+		return m.tree, nil, nil
+	}
+	prevSnapshot, prevTree, prevCreated := m.prev, m.tree, m.created
+	root, err := m.advance(modifiedJSON)
+	if err != nil {
+		return nil, nil, err
+	}
+	var ops []op
+	if prevSnapshot != nil {
+		if ops, err = diffTrees(prevTree, root, arrayOps); err != nil {
+			m.prev, m.tree, m.created = prevSnapshot, prevTree, prevCreated
+			return nil, nil, err
+		}
+	}
 	return root, ops, nil
 }
 
