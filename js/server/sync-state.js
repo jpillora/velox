@@ -1,7 +1,6 @@
 const Connection = require("./connection");
 const throttle = require("lodash/throttle");
 const compressor = require("compression")();
-const jsonmergepatch = require("json-merge-patch");
 const merkle = require("./merkle");
 const crypto = require("crypto");
 
@@ -80,30 +79,47 @@ class SyncState {
   }
 
   push() {
+    //the document is serialised exactly once per push; the tree is built by
+    //scanning this string, and both protocols' patches derive from the trees
     let json = JSON.stringify(this.obj);
     if (this.json === json) {
       return;
     }
     this.version++;
-    //compute diff (from 2nd push onwards)
-    if (this.prevObj) {
-      this.delta = JSON.stringify(
-        jsonmergepatch.generate(this.prevObj, this.obj)
-      );
-    }
-    //rebuild the merkle tree; unchanged subtrees are reused by identity
     let stats = {created: 0};
-    this.root = merkle.buildRoot(this.root, this.obj, this.leafSize, stats);
+    let prevRoot = this.root;
+    //the encoded form is retained as a Buffer so the next build's byte
+    //comparisons run against it without re-encoding the previous document
+    let buf = Buffer.from(json, "utf8");
+    this.root = merkle.buildRoot(prevRoot, this.buf || "", buf, this.leafSize, stats);
+    this.buf = buf;
     this.rootHash = this.root ? this.root.hash : "";
+    //the v2 merge patch is computed on first use by deltaV2 and memoised, so
+    //a v3-only fleet never pays for the projection
+    this.prevRoot = prevRoot || null;
+    this.delta = null;
     this.recordVersion(stats.created);
     this.patchCache.clear();
-    this.prevObj = JSON.parse(json); // save previous state
     this.json = json;
     //push to all subscribers
     for (let i = 0; i < this.subscribers.length; i++) {
       let conn = this.subscribers[i];
       conn.push();
     }
+  }
+
+  //deltaV2 returns the serialised RFC 7386 merge patch carrying version-1 to
+  //the current version, derived from the same trees the v3 diff uses rather
+  //than by a second document-wide comparison.
+  deltaV2() {
+    if (this.delta !== null && this.delta !== undefined) {
+      return this.delta;
+    }
+    if (!this.prevRoot || !this.root) {
+      return null;
+    }
+    this.delta = merkle.mergePatchFromOps(merkle.diffOps(this.prevRoot, this.root, false));
+    return this.delta;
   }
 
   recordVersion(created) {
@@ -146,7 +162,7 @@ class SyncState {
     }
     //a miss is memoised as null so a client stuck on an evicted base is not
     //re-diffed on every push
-    let payload = base ? JSON.stringify(merkle.diff(base, this.root)) : null;
+    let payload = base ? merkle.serializeOps(merkle.diffOps(base, this.root, true)) : null;
     this.patchCache.set(baseHash, payload);
     return payload;
   }

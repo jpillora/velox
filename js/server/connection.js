@@ -79,7 +79,11 @@ module.exports = class Connection {
       return;
     }
     this.pushing = true;
-    //build update for this connection
+    //build update for this connection. The state can move on while the write
+    //below is awaited, so record what was actually sent, not whatever the
+    //state holds once the write returns.
+    let sentVersion = this.state.version;
+    let sentRoot = this.state.rootHash;
     let id = undefined;
     if (this.writes === 0) {
       id = this.state.id;
@@ -92,9 +96,9 @@ module.exports = class Connection {
       let useOps = ops !== null && ops.length < this.state.json.length;
       let update = {
         id: id,
-        version: this.state.version,
+        version: sentVersion,
         proto: this.writes === 0 ? 3 : undefined,
-        root: this.state.rootHash,
+        root: sentRoot,
         base: useOps ? this.baseHash : undefined,
         ops: null
       };
@@ -102,25 +106,25 @@ module.exports = class Connection {
         /"ops":null\}$/,
         useOps ? `"ops":${ops}}` : `"body":${this.state.json}}`
       );
-      this.baseHash = this.state.rootHash;
     } else {
       let delta = undefined;
-      if (
-        this.state.delta &&
-        this.state.delta.length < this.state.json.length &&
-        this.version === this.state.version - 1
-      ) {
+      let deltaJson = null;
+      //the v2 projection is computed on first use and memoised in the state
+      if (this.version === this.state.version - 1) {
+        deltaJson = this.state.deltaV2();
+      }
+      if (deltaJson && deltaJson.length < this.state.json.length) {
         delta = true;
       }
 
       let update = {
         id: id,
-        version: this.state.version,
+        version: sentVersion,
         delta: delta,
         body: null
       };
       //string replace to make use of cached json payload
-      let body = delta ? this.state.delta : this.state.json;
+      let body = delta ? deltaJson : this.state.json;
       payload = JSON.stringify(update).replace(
         /"body":null\}$/,
         `"body":${body}}`
@@ -130,8 +134,12 @@ module.exports = class Connection {
     //write onto the wire!
     await this.transport.write(payload);
     this.writes++;
-    //success
-    this.version = this.state.version;
+    //success — recorded only after the write, so a failed send does not leave
+    //the connection claiming the client holds a root it never received
+    this.version = sentVersion;
+    if (this.proto >= 3) {
+      this.baseHash = sentRoot;
+    }
     //cleanup
     this.pushing = false;
     if (this.queued) {
