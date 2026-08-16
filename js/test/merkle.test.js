@@ -67,9 +67,9 @@ for (const leafSize of [1, 512]) {
   console.log("  ok   structural sharing");
 }
 
-//Positional operations' worst case: a prepend shifts every element, so a naive
-//differ emits one assignment per element. The differ must send the array
-//instead, bounding v3 at no worse than a whole-array replacement.
+//A prepend shifts every element, which used to be positional operations' worst
+//case. The serial hash trim must express it as one splice carrying only the
+//inserted value.
 {
   const elements = [];
   for (let i = 0; i < 200; i++) elements.push(i);
@@ -80,12 +80,52 @@ for (const leafSize of [1, 512]) {
   const second = merkle.buildRoot(first, after, 1, stats);
   const ops = merkle.diff(first, second);
   assert.strictEqual(ops.length, 1, "a prepend produced " + ops.length + " operations");
+  assert.deepStrictEqual(ops[0], ["x", ["log"], 0, 0, [999]], "a prepend was not one head splice");
+  const target = JSON.parse(JSON.stringify(before));
+  applyOps(target, ops);
+  assert.deepStrictEqual(target, after);
+  console.log("  ok   a prepend costs one splice");
+}
+
+//A cross-shift defeats the trim and pairs every element wrongly, so a naive
+//differ emits one assignment per element. The differ must send the array
+//instead, bounding v3 at no worse than a whole-array replacement.
+{
+  const elements = [];
+  for (let i = 0; i < 200; i++) elements.push(i);
+  const before = {log: elements.slice()};
+  const after = {log: elements.slice().reverse()};
+  const stats = {created: 0};
+  const first = merkle.buildRoot(null, before, 1, stats);
+  const second = merkle.buildRoot(first, after, 1, stats);
+  const ops = merkle.diff(first, second);
+  assert.strictEqual(ops.length, 1, "a reversal produced " + ops.length + " operations");
   assert.strictEqual(ops[0][0], "s");
   assert.deepStrictEqual(ops[0][1], ["log"], "collapse did not target the array");
   const target = JSON.parse(JSON.stringify(before));
   applyOps(target, ops);
   assert.deepStrictEqual(target, after);
   console.log("  ok   collapses operations that outweigh their subtree");
+}
+
+//Middle deletions and insertions must splice rather than reassign the tail.
+//Elements are padded so addressing one really is cheaper than resending the
+//array; on tiny elements the collapse rule would (correctly) take over.
+{
+  const pad = m => m + "x".repeat(60);
+  const before = {log: [pad("a"), pad("b"), pad("c"), pad("d")]};
+  const after = {log: [pad("a"), pad("B"), pad("d")]};
+  const stats = {created: 0};
+  const first = merkle.buildRoot(null, before, 1, stats);
+  const second = merkle.buildRoot(first, after, 1, stats);
+  const ops = merkle.diff(first, second);
+  const target = JSON.parse(JSON.stringify(before));
+  applyOps(target, ops);
+  assert.deepStrictEqual(target, after);
+  assert.strictEqual(ops.length, 2, "edit plus deletion produced " + JSON.stringify(ops));
+  assert.strictEqual(ops[0][0], "s", "the edited element was not assigned in place");
+  assert.strictEqual(ops[1][0], "x", "the deletion was not a splice");
+  console.log("  ok   splices inner deletions and insertions");
 }
 
 //The root must never collapse: the operation would have an empty path.

@@ -6,9 +6,10 @@
 //properties the caller added for its own use — Angular's $-prefixed ones
 //included — are never walked over.
 //
-//  ["s", path, value]  assign; path targets the child
-//  ["d", path]         delete; path targets the child
-//  ["n", path, length] truncate; path targets the array itself
+//  ["s", path, value]                  assign; path targets the child
+//  ["d", path]                         delete; path targets the child
+//  ["n", path, length]                 truncate; path targets the array itself
+//  ["x", path, start, delete, values?] splice; path targets the array itself
 //
 //Path elements are strings for object keys and numbers for array indices, so a
 //numeric-looking object key never collides with an index.
@@ -42,6 +43,33 @@ module.exports = function applyOps(root, ops) {
         throw new Error("velox: truncate outside an array");
       }
       target.length = op[2];
+      continue;
+    }
+    if (kind === "x") {
+      let target = resolve(root, path, path.length);
+      if (!Array.isArray(target)) {
+        throw new Error("velox: splice outside an array");
+      }
+      let start = op[2];
+      let removed = op[3];
+      let values = op.length > 4 ? op[4] : [];
+      if (
+        !Number.isInteger(start) || !Number.isInteger(removed) ||
+        start < 0 || removed < 0 || start + removed > target.length ||
+        !Array.isArray(values)
+      ) {
+        throw new Error("velox: invalid splice");
+      }
+      //spreading huge inserts would overflow the argument limit, so large
+      //values go through in chunks after the deletion is applied once
+      if (values.length <= 4096) {
+        target.splice(start, removed, ...values);
+      } else {
+        target.splice(start, removed);
+        for (let j = 0; j < values.length; j += 4096) {
+          target.splice(start + j, 0, ...values.slice(j, j + 4096));
+        }
+      }
       continue;
     }
     if (path.length === 0) {

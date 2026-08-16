@@ -9,9 +9,10 @@ import (
 // Operation kinds carried by a protocol v3 patch. Operations are ordered and
 // must be applied in sequence.
 const (
-	opSet = "s" // ["s", path, value] — path targets the child being assigned
-	opDel = "d" // ["d", path]        — path targets the child being removed
-	opLen = "n" // ["n", path, len]   — path targets the array being truncated
+	opSet    = "s" // ["s", path, value]                  — path targets the child being assigned
+	opDel    = "d" // ["d", path]                         — path targets the child being removed
+	opLen    = "n" // ["n", path, len]                    — path targets the array being truncated
+	opSplice = "x" // ["x", path, start, delete, values?] — path targets the array being spliced
 )
 
 // op is one entry of a v3 patch. Path elements are strings for object keys and
@@ -20,8 +21,10 @@ const (
 type op struct {
 	kind   string
 	path   []any
-	value  json.RawMessage
+	value  json.RawMessage // set: the value; splice: the inserted values as one array
 	length int
+	start  int // splice: first affected index
+	remove int // splice: elements removed at start
 }
 
 // MarshalJSON encodes the operation as a positional array, which is
@@ -42,6 +45,16 @@ func (o op) MarshalJSON() ([]byte, error) {
 	case opLen:
 		out = append(out, ',')
 		out = strconv.AppendInt(out, int64(o.length), 10)
+	case opSplice:
+		out = append(out, ',')
+		out = strconv.AppendInt(out, int64(o.start), 10)
+		out = append(out, ',')
+		out = strconv.AppendInt(out, int64(o.remove), 10)
+		// a pure deletion carries no values field at all
+		if len(o.value) > 0 {
+			out = append(out, ',')
+			out = append(out, o.value...)
+		}
 	}
 	return append(out, ']'), nil
 }
@@ -91,6 +104,25 @@ func (o *op) UnmarshalJSON(data []byte) error {
 		}
 		if err := json.Unmarshal(fields[2], &o.length); err != nil {
 			return err
+		}
+	case opSplice:
+		if len(fields) < 4 {
+			return errors.New("velox: splice operation has no range")
+		}
+		if err := json.Unmarshal(fields[2], &o.start); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(fields[3], &o.remove); err != nil {
+			return err
+		}
+		if o.start < 0 || o.remove < 0 {
+			return errors.New("velox: negative splice range")
+		}
+		if len(fields) > 4 {
+			if firstJSONByte(fields[4]) != '[' {
+				return errors.New("velox: splice values must be an array")
+			}
+			o.value = fields[4]
 		}
 	case opDel:
 	default:
@@ -184,6 +216,11 @@ func (o op) size() int {
 		total += len(",") + len(o.value)
 	case opLen:
 		total += len(",999")
+	case opSplice:
+		total += len(",999,999")
+		if len(o.value) > 0 {
+			total += len(",") + len(o.value)
+		}
 	}
 	return total
 }
@@ -301,33 +338,88 @@ func (d *differ) walkObject(a, b *mnode) error {
 }
 
 func (d *differ) walkArray(a, b *mnode) error {
-	// Without per-index operations, recurse only to decide whether anything
-	// changed, then discard those operations in favour of one assignment of the
-	// whole array.
 	savepoint := len(d.ops)
 
-	if d.arrayOps && len(b.kids) < len(a.kids) {
-		d.emit(op{kind: opLen, length: len(b.kids)})
-	}
-	for i, kid := range b.kids {
-		d.push(i)
-		if i < len(a.kids) {
-			if err := d.walk(a.kids[i], kid); err != nil {
-				d.pop()
+	// Without per-index operations any change collapses to one assignment of
+	// the whole array, so recurse only until something proves changed.
+	if !d.arrayOps {
+		changed := len(a.kids) != len(b.kids)
+		for i := 0; !changed && i < len(b.kids); i++ {
+			if err := d.walk(a.kids[i], b.kids[i]); err != nil {
 				return err
 			}
-		} else {
-			d.emitSet(kid)
+			changed = len(d.ops) > savepoint
+		}
+		if changed {
+			d.ops = d.ops[:savepoint]
+			d.emitSet(b)
+		}
+		return nil
+	}
+
+	// Serially compare hashes from both ends. Whatever survives the trim is the
+	// window that actually moved: in-place edits keep the two middles the same
+	// length and diff pairwise, while a length change becomes one splice — so an
+	// insertion or deletion anywhere costs one operation instead of shifting
+	// every element after it into a fresh assignment.
+	prefix := 0
+	for prefix < len(a.kids) && prefix < len(b.kids) && sameSubtree(a.kids[prefix], b.kids[prefix]) {
+		prefix++
+	}
+	suffix := 0
+	for suffix < len(a.kids)-prefix && suffix < len(b.kids)-prefix &&
+		sameSubtree(a.kids[len(a.kids)-1-suffix], b.kids[len(b.kids)-1-suffix]) {
+		suffix++
+	}
+	midA := len(a.kids) - prefix - suffix
+	midB := len(b.kids) - prefix - suffix
+
+	// Pair the leading middles so an edited element still diffs in place, then
+	// express the leftover length difference as one splice. The pairing is a
+	// heuristic — a true cross-shift pairs wrongly — and collapse bounds that
+	// case at a whole-array assignment, exactly what v2 would have sent.
+	pairs := min(midA, midB)
+	for i := prefix; i < prefix+pairs; i++ {
+		d.push(i)
+		if err := d.walk(a.kids[i], b.kids[i]); err != nil {
+			d.pop()
+			return err
 		}
 		d.pop()
 	}
-	if !d.arrayOps && (len(d.ops) > savepoint || len(a.kids) != len(b.kids)) {
-		d.ops = d.ops[:savepoint]
-		d.emitSet(b)
-		return nil
+	switch {
+	case midA > midB:
+		if suffix == 0 {
+			// a pure tail truncation has a dedicated, smaller operation
+			d.emit(op{kind: opLen, length: len(b.kids)})
+		} else {
+			d.emit(op{kind: opSplice, start: prefix + pairs, remove: midA - midB})
+		}
+	case midB > midA:
+		inserted := b.kids[prefix+pairs : prefix+midB]
+		size := len("[]") + separators(len(inserted))
+		for _, kid := range inserted {
+			size += kid.size
+		}
+		values := make([]byte, 0, size)
+		values = append(values, '[')
+		for i, kid := range inserted {
+			if i > 0 {
+				values = append(values, ',')
+			}
+			values = kid.appendJSON(values)
+		}
+		values = append(values, ']')
+		d.emit(op{kind: opSplice, start: prefix + pairs, value: values})
 	}
 	d.collapse(savepoint, b)
 	return nil
+}
+
+// sameSubtree is the serial-trim equality: pointer identity means the subtree
+// was shared when b was built, and hash equality covers equal bytes rebuilt.
+func sameSubtree(a, b *mnode) bool {
+	return a == b || a.hash == b.hash
 }
 
 // mergePatchFromOps projects operations back into an RFC 7386 merge patch for
@@ -455,6 +547,25 @@ func applyHere(node any, o op) (any, error) {
 			return nil, errors.New("velox: truncate outside an array")
 		}
 		return elements[:o.length], nil
+	case opSplice:
+		elements, ok := node.([]any)
+		if !ok {
+			return nil, errors.New("velox: splice outside an array")
+		}
+		if o.start < 0 || o.remove < 0 || o.start+o.remove > len(elements) {
+			return nil, errors.New("velox: splice out of range")
+		}
+		var values []any
+		if len(o.value) > 0 {
+			if err := json.Unmarshal(o.value, &values); err != nil {
+				return nil, err
+			}
+		}
+		out := make([]any, 0, len(elements)-o.remove+len(values))
+		out = append(out, elements[:o.start]...)
+		out = append(out, values...)
+		out = append(out, elements[o.start+o.remove:]...)
+		return out, nil
 	default:
 		return nil, errors.New("velox: unsupported operation " + o.kind)
 	}

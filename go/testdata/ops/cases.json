@@ -249,6 +249,132 @@
     ]
   },
   {
+    "name": "array prepended",
+    "before": {
+      "log": [
+        1,
+        2,
+        3
+      ]
+    },
+    "after": {
+      "log": [
+        9,
+        1,
+        2,
+        3
+      ]
+    },
+    "ops": [
+      [
+        "s",
+        [
+          "log"
+        ],
+        [
+          9,
+          1,
+          2,
+          3
+        ]
+      ]
+    ]
+  },
+  {
+    "name": "array middle insertion",
+    "before": {
+      "log": [
+        1,
+        2,
+        3
+      ]
+    },
+    "after": {
+      "log": [
+        1,
+        8,
+        9,
+        2,
+        3
+      ]
+    },
+    "ops": [
+      [
+        "s",
+        [
+          "log"
+        ],
+        [
+          1,
+          8,
+          9,
+          2,
+          3
+        ]
+      ]
+    ]
+  },
+  {
+    "name": "array middle deletion",
+    "before": {
+      "log": [
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    "after": {
+      "log": [
+        1,
+        4
+      ]
+    },
+    "ops": [
+      [
+        "s",
+        [
+          "log"
+        ],
+        [
+          1,
+          4
+        ]
+      ]
+    ]
+  },
+  {
+    "name": "array edited and spliced",
+    "before": {
+      "log": [
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    "after": {
+      "log": [
+        1,
+        9,
+        4
+      ]
+    },
+    "ops": [
+      [
+        "s",
+        [
+          "log"
+        ],
+        [
+          1,
+          9,
+          4
+        ]
+      ]
+    ]
+  },
+  {
     "name": "nested arrays",
     "before": {
       "m": [

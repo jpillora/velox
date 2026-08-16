@@ -147,19 +147,54 @@ function walk(a, b, path, ops) {
     collapse(a, b, path, ops, savepoint);
     return;
   }
-  if (b.kids.length < a.kids.length) {
-    ops.push(["n", path.slice(), b.kids.length]);
+  //Serially compare hashes from both ends. Whatever survives the trim is the
+  //window that actually moved: in-place edits keep the two middles the same
+  //length and diff pairwise, while a length change becomes one splice — so an
+  //insertion or deletion anywhere costs one operation instead of shifting
+  //every element after it into a fresh assignment.
+  let prefix = 0;
+  while (prefix < a.kids.length && prefix < b.kids.length && same(a.kids[prefix], b.kids[prefix])) {
+    prefix++;
   }
-  for (let i = 0; i < b.kids.length; i++) {
+  let suffix = 0;
+  while (
+    suffix < a.kids.length - prefix && suffix < b.kids.length - prefix &&
+    same(a.kids[a.kids.length - 1 - suffix], b.kids[b.kids.length - 1 - suffix])
+  ) {
+    suffix++;
+  }
+  const midA = a.kids.length - prefix - suffix;
+  const midB = b.kids.length - prefix - suffix;
+  //Pair the leading middles so an edited element still diffs in place, then
+  //express the leftover length difference as one splice. A true cross-shift
+  //pairs wrongly; collapse bounds that case at a whole-array assignment.
+  const pairs = Math.min(midA, midB);
+  for (let i = prefix; i < prefix + pairs; i++) {
     path.push(i);
-    if (i < a.kids.length) {
-      walk(a.kids[i], b.kids[i], path, ops);
-    } else {
-      ops.push(["s", path.slice(), JSON.parse(b.kids[i].raw)]);
-    }
+    walk(a.kids[i], b.kids[i], path, ops);
     path.pop();
   }
+  if (midA > midB) {
+    if (suffix === 0) {
+      //a pure tail truncation has a dedicated, smaller operation
+      ops.push(["n", path.slice(), b.kids.length]);
+    } else {
+      ops.push(["x", path.slice(), prefix + pairs, midA - midB]);
+    }
+  } else if (midB > midA) {
+    const values = [];
+    for (let i = prefix + pairs; i < prefix + midB; i++) {
+      values.push(JSON.parse(b.kids[i].raw));
+    }
+    ops.push(["x", path.slice(), prefix + pairs, 0, values]);
+  }
   collapse(a, b, path, ops, savepoint);
+}
+
+//same is the serial-trim equality: identity means the subtree was shared when
+//b was built, and hash equality covers equal bytes rebuilt.
+function same(a, b) {
+  return a === b || a.hash === b.hash;
 }
 
 module.exports = {build, buildRoot, diff, LEAF, OBJECT, ARRAY};

@@ -204,16 +204,24 @@ Operations address one child each:
 | `["s", path, value]` | assign; `path` targets the child |
 | `["d", path]` | delete; `path` targets the child |
 | `["n", path, length]` | truncate; `path` targets the array |
+| `["x", path, start, delete, values?]` | splice; `path` targets the array |
 
 Path elements are strings for object keys and numbers for array indices, so a
 numeric-looking key never collides with an index. Unlike v2, changing one element
-of an array does not resend the array. Arrays are only ever changed by `s` and
-`n`; a `d` against an array index is invalid and both appliers reject it.
+of an array does not resend the array. Arrays are only ever changed by `s`, `n`
+and `x`; a `d` against an array index is invalid and both appliers reject it.
 
-When the operations describing a change would cost more than the subtree they
-patch -- prepending to a long array, say, which shifts every element -- the
-differ sends the subtree instead, so v3 is never much worse than v2 on the shapes
-positional operations handle badly.
+Array diffs compare the two versions' element hashes serially from both ends.
+Elements that survive the trim never travel; an in-place edit diffs pairwise,
+and a length change becomes one `x` — inserting or deleting anywhere in a long
+array costs a single operation carrying only the affected values, where a purely
+positional differ would reassign every element after the change. A pure tail
+truncation stays the smaller `n`.
+
+When the operations describing a change would still cost more than the subtree
+they patch — reversing a long array, say, which defeats the trim entirely — the
+differ sends the subtree instead, so v3 is never much worse than v2 even on the
+shapes positional operations handle badly.
 
 A client applies operations only when their `base` matches the root it holds.
 Because hashes are opaque it cannot check anything else, and operations applied

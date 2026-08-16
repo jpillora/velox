@@ -124,8 +124,35 @@ func TestV3ArrayOperationsAddressElements(t *testing.T) {
 			name:       "array grown",
 			before:     `{"log":["` + pad("a") + `","` + pad("b") + `"]}`,
 			after:      `{"log":["` + pad("a") + `","` + pad("b") + `","` + pad("c") + `","` + pad("d") + `"]}`,
-			wantKinds:  []string{opSet, opSet},
+			wantKinds:  []string{opSplice},
 			wantAppend: true,
+		},
+		// The serial hash trim turns shifts into splices: one operation for an
+		// insertion or deletion anywhere, instead of reassigning every element
+		// after it.
+		{
+			name:      "array prepended",
+			before:    `{"log":["` + pad("a") + `","` + pad("b") + `","` + pad("c") + `"]}`,
+			after:     `{"log":["` + pad("z") + `","` + pad("a") + `","` + pad("b") + `","` + pad("c") + `"]}`,
+			wantKinds: []string{opSplice},
+		},
+		{
+			name:      "middle insertion",
+			before:    `{"log":["` + pad("a") + `","` + pad("b") + `","` + pad("c") + `"]}`,
+			after:     `{"log":["` + pad("a") + `","` + pad("z") + `","` + pad("b") + `","` + pad("c") + `"]}`,
+			wantKinds: []string{opSplice},
+		},
+		{
+			name:      "middle deletion",
+			before:    `{"log":["` + pad("a") + `","` + pad("b") + `","` + pad("c") + `","` + pad("d") + `"]}`,
+			after:     `{"log":["` + pad("a") + `","` + pad("d") + `"]}`,
+			wantKinds: []string{opSplice},
+		},
+		{
+			name:      "edit then deletion",
+			before:    `{"log":["` + pad("a") + `","` + pad("b") + `","` + pad("c") + `","` + pad("d") + `"]}`,
+			after:     `{"log":["` + pad("a") + `","` + pad("B") + `","` + pad("d") + `"]}`,
+			wantKinds: []string{opSet, opSplice},
 		},
 	}
 	for _, tt := range tests {
@@ -164,17 +191,20 @@ func pad(marker string) string {
 }
 
 // TestV3CollapsesOperationsThatOutweighTheSubtree covers positional operations'
-// worst case. Inserting at the head of an array shifts every element, so a naive
-// differ emits one assignment per element — more bytes than the whole array. The
-// differ must notice and send the array instead, which bounds v3 at no worse
-// than v2 rather than dramatically worse.
+// worst case. A cross-shift — here a reversal — defeats the serial hash trim
+// and pairs every element wrongly, so a naive differ emits one assignment per
+// element: more bytes than the whole array. The differ must notice and send
+// the array instead, which bounds v3 at no worse than v2 rather than
+// dramatically worse.
 func TestV3CollapsesOperationsThatOutweighTheSubtree(t *testing.T) {
 	elements := make([]string, 200)
+	reversed := make([]string, 200)
 	for i := range elements {
 		elements[i] = strconv.Itoa(i)
+		reversed[len(reversed)-1-i] = elements[i]
 	}
 	before := `{"log":[` + strings.Join(elements, ",") + `]}`
-	after := `{"log":[999,` + strings.Join(elements, ",") + `]}`
+	after := `{"log":[` + strings.Join(reversed, ",") + `]}`
 
 	patcher := &mergePatcher{leafSize: 1}
 	if _, err := patcher.patch([]byte(before)); err != nil {
@@ -185,7 +215,7 @@ func TestV3CollapsesOperationsThatOutweighTheSubtree(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(ops) != 1 {
-		t.Fatalf("a prepend produced %d operations, want the array sent once", len(ops))
+		t.Fatalf("a reversal produced %d operations, want the array sent once", len(ops))
 	}
 	if ops[0].kind != opSet || len(ops[0].path) != 1 {
 		t.Fatalf("collapse emitted %v, want a single assignment of the array", ops[0])
@@ -195,6 +225,25 @@ func TestV3CollapsesOperationsThatOutweighTheSubtree(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertOpsRoundTrip(t, before, after, ops)
+
+	// The shape that used to be the worst case — a prepend shifting every
+	// element — must now be one splice carrying just the inserted value.
+	prependPatcher := &mergePatcher{leafSize: 1}
+	if _, err := prependPatcher.patch([]byte(before)); err != nil {
+		t.Fatal(err)
+	}
+	prepended := `{"log":[999,` + strings.Join(elements, ",") + `]}`
+	_, prependOps, err := prependPatcher.update([]byte(prepended), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prependOps) != 1 || prependOps[0].kind != opSplice {
+		t.Fatalf("a prepend produced %v, want one splice", prependOps)
+	}
+	if encoded, err := json.Marshal(prependOps); err != nil || len(encoded) > 64 {
+		t.Fatalf("prepend splice encodes to %d bytes (%v), want a handful", len(encoded), err)
+	}
+	assertOpsRoundTrip(t, before, prepended, prependOps)
 
 	// The guarantee is that v3 is never dramatically worse than v2 on this
 	// shape, so compare against what v2 would have sent for the same change.
@@ -334,6 +383,11 @@ func FuzzV3RoundTrip(f *testing.F) {
 		{`{"a":{"b":1}}`, `{"a":"scalar"}`},
 		{`{"a":"scalar"}`, `{"a":{"b":1}}`},
 		{`{"a":[{"x":1},{"y":2}]}`, `{"a":[{"x":1},{"y":3},{"z":4}]}`},
+		{`{"a":[1,2,3]}`, `{"a":[9,1,2,3]}`},
+		{`{"a":[1,2,3,4]}`, `{"a":[1,4]}`},
+		{`{"a":[1,2,3]}`, `{"a":[1,9,2,3]}`},
+		{`{"a":[1,2,3,4]}`, `{"a":[4,3,2,1]}`},
+		{`{"a":[1,2,3,4]}`, `{"a":[1,9,4]}`},
 		{`{"a":1,"b":2,"c":3}`, `{"c":3,"b":2,"a":1}`},
 		{`{"n":1}`, `{"n":1.0}`},
 		{`{"n":-0}`, `{"n":0}`},
