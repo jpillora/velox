@@ -9,7 +9,14 @@ Real-time JS object synchronisation over SSE and WebSockets in Go and JavaScript
 - Simple API
 - Synchronise any JSON marshallable struct in Go
 - Synchronise any JSON stringifiable struct in Node
-- Delta updates using [JSONPatch (RFC6902)](https://tools.ietf.org/html/rfc6902)
+- Delta updates via merkle-tree diffing: patches address individual object keys
+  and array elements, and an insertion or deletion anywhere in an array travels
+  as a single splice
+- Reconnects and page reloads resume from a small patch instead of the full
+  document, however many versions were missed (see [Protocol](#protocol))
+- Opt-in browser persistence, so a reload resumes from local storage
+- Falls back to [JSON Merge Patch (RFC 7386)](https://tools.ietf.org/html/rfc7386)
+  for older clients and servers, negotiated automatically
 - Supports [Server-Sent Events (EventSource)](https://en.wikipedia.org/wiki/Server-sent_events) and [WebSockets](https://en.wikipedia.org/wiki/WebSocket)
 - SSE [client-side poly-fill](https://github.com/remy/polyfills/blob/master/EventSource.js) to fallback to long-polling in older browsers (IE8+).
 - Generic `VMap` and `VSlice` containers with automatic locking and push-on-write
