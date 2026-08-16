@@ -25,6 +25,12 @@ type mergePatcher struct {
 	tree     *mnode
 	leafSize int
 	created  int // nodes the most recent build allocated
+	// ownsInput records that update's caller hands over freshly-allocated
+	// buffers it will never touch again — true when the state's Data is velox's
+	// own marshaller — letting the patcher keep the buffer instead of cloning a
+	// whole document per push. A caller-supplied MarshalFunc may reuse its
+	// buffer, so anything else still takes the defensive copy.
+	ownsInput bool
 }
 
 func (m *mergePatcher) builder() merkleBuilder {
@@ -68,14 +74,16 @@ func (m *mergePatcher) update(modifiedJSON []byte, arrayOps bool) (root *mnode, 
 			return nil, nil, err
 		}
 	}
-	// The caller may reuse its marshal buffer, so the snapshot is cloned. Leaves
-	// own their bytes too, leaving the tree independent of both buffers.
-	//
-	// This clone is the state's one authoritative snapshot: State.data.bytes
+	// This becomes the state's one authoritative snapshot: State.data.bytes
 	// aliases it rather than taking a second copy. Both are immutable once
-	// published, so the sharing is safe, and it keeps a push from allocating and
-	// copying the whole document twice over.
-	m.prev = bytes.Clone(modifiedJSON)
+	// published, so the sharing is safe. When the marshaller's buffer is not
+	// velox's to keep, it is cloned; leaves own their bytes either way, leaving
+	// the tree independent of every snapshot buffer.
+	if m.ownsInput {
+		m.prev = modifiedJSON
+	} else {
+		m.prev = bytes.Clone(modifiedJSON)
+	}
 	m.tree = root
 	m.created = created
 	return root, ops, nil

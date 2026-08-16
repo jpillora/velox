@@ -11,7 +11,9 @@ import (
 // json-serializable data. If data is a sync.Locker,
 // it will be locked during the marshalling process.
 func NewAny(data any) *State {
-	return New(Marshal(data))
+	s := New(Marshal(data))
+	s.markDataOwned()
+	return s
 }
 
 // New creates a new State object with the given data function. An initial Data
@@ -44,6 +46,7 @@ func SyncHandler(gostruct interface{}) http.Handler {
 	if tmp, ok := gostruct.(stateEmbedded); ok {
 		s = tmp.self()
 		s.Data = Marshal(gostruct)
+		s.markDataOwned()
 		var locker sync.Locker
 		if s.Locker != nil {
 			locker = s.Locker
@@ -58,6 +61,7 @@ func SyncHandler(gostruct interface{}) http.Handler {
 	// otherwise, check if the struct is a pointer to a struct
 	if s == nil {
 		s = New(Marshal(gostruct))
+		s.markDataOwned()
 	}
 	return s
 }
@@ -72,6 +76,7 @@ type MarshalFunc func() (json.RawMessage, error)
 // manually using this method, you'll most likely want to block using Conn.Wait().
 func Sync(gostruct interface{}, w http.ResponseWriter, r *http.Request) (Conn, error) {
 	state := New(Marshal(gostruct))
+	state.markDataOwned()
 	return state.Handle(w, r)
 }
 

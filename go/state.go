@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"reflect"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -79,6 +80,10 @@ type State struct {
 	conns   map[int64]*conn
 	// transportFactory is a test seam for deterministic transport failures.
 	transportFactory func(*http.Request) transport
+	// dataOwned records that Data was assigned by velox itself (see
+	// markDataOwned), whose buffers are fresh per call and safe to keep.
+	dataOwned    bool
+	ownedDataPtr uintptr
 	data             struct {
 		mut      sync.RWMutex
 		id       string //data id != conn id
@@ -133,6 +138,7 @@ func (s *State) init() error {
 	if s.Data == nil {
 		return fmt.Errorf("no data function provided")
 	}
+	s.data.patcher.ownsInput = s.ownsData()
 	// Capture the generation before marshaling. A concurrent Push advances it,
 	// leaving this initial snapshot stale for the push worker or subscriber.
 	generation := s.push.generation.Load()
@@ -183,6 +189,25 @@ func (s *State) init() error {
 
 func (s *State) self() *State {
 	return s
+}
+
+// markDataOwned records that Data is velox's own marshaller, which allocates a
+// fresh buffer on every call: json.Marshal builds its output from scratch even
+// when containers hand back cached encodings. That lets the patcher keep the
+// buffer as its snapshot instead of cloning a whole document per push. A
+// MarshalFunc supplied by the caller may reuse its buffer, so it never gets
+// this mark and keeps today's defensive copy.
+func (s *State) markDataOwned() {
+	s.dataOwned = true
+	s.ownedDataPtr = reflect.ValueOf(s.Data).Pointer()
+}
+
+// ownsData re-checks the mark against the current Data, so a caller that
+// swaps in its own function after construction quietly loses the hand-over
+// rather than aliasing a buffer velox assumed was fresh. All Marshal closures
+// share one code pointer, so swapping one for another keeps the mark.
+func (s *State) ownsData() bool {
+	return s.dataOwned && s.Data != nil && reflect.ValueOf(s.Data).Pointer() == s.ownedDataPtr
 }
 
 // incrementalEnabled reports whether containers may cache their encoding.
@@ -499,6 +524,9 @@ func (s *State) refresh() (changed bool, err error) {
 	}
 	s.data.mut.Lock()
 	defer s.data.mut.Unlock()
+	// Re-checked every refresh: Data is a public field and may have been
+	// swapped for a function whose buffers velox must not keep.
+	s.data.patcher.ownsInput = s.ownsData()
 	changed = false
 	// rebuilt records whether the patcher ran, which is when the merkle tree it
 	// owns has moved on and the published tree needs to catch up. That is not
