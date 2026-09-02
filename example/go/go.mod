@@ -1,13 +1,13 @@
 module github.com/jpillora/velox/example/go
 
-go 1.26.5
+go 1.26.8
 
 replace github.com/jpillora/velox => ../..
 
 require (
 	github.com/jpillora/sizestr v1.0.0
-	github.com/jpillora/velox v0.4.2
-	google.golang.org/grpc v1.82.1
+	github.com/jpillora/velox v0.11.0
+	google.golang.org/grpc v1.83.2
 )
 
 require (
