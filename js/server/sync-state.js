@@ -160,10 +160,13 @@ class SyncState {
         break;
       }
     }
-    //a miss is memoised as null so a client stuck on an evicted base is not
-    //re-diffed on every push
+    //Do not memoise misses. baseHash comes from the client, so remembering
+    //every unknown token makes patchCache an unbounded per-publish allocation.
+    //The retained-history lookup is tiny and bounded, and cheap to repeat.
     let payload = base ? merkle.serializeOps(merkle.diffOps(base, this.root, true)) : null;
-    this.patchCache.set(baseHash, payload);
+    if (payload !== null) {
+      this.patchCache.set(baseHash, payload);
+    }
     return payload;
   }
 

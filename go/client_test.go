@@ -1,9 +1,12 @@
 package velox_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -503,5 +506,27 @@ func TestNewClientValidation(t *testing.T) {
 	}
 	if client == nil {
 		t.Error("Expected non-nil client")
+	}
+}
+
+func TestClientRejectsOversizedSSEEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// The payload does not need to be valid JSON: the bounded decoder must
+		// reject it before json.Unmarshal can inspect a peer-chosen allocation.
+		_, _ = w.Write(append([]byte("data: "), append(bytes.Repeat([]byte{'x'}, 1024), []byte("\n\n")...)...))
+	}))
+	defer server.Close()
+
+	type clientState struct{ Value string }
+	client, err := velox.NewClient(server.URL, &clientState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Retry = false
+	client.MaxEventSize = 64
+	err = client.Connect(t.Context())
+	if !errors.Is(err, velox.ErrEventTooLarge) {
+		t.Fatalf("Connect error = %v, want ErrEventTooLarge", err)
 	}
 }

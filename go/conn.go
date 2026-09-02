@@ -24,7 +24,7 @@ type Conn interface {
 type conn struct {
 	transport   transport
 	state       *State
-	connected   bool
+	connected   atomic.Bool
 	connectedAt time.Time
 	connectedCh chan struct{}
 	waiter      sync.WaitGroup
@@ -63,7 +63,7 @@ func (c *conn) ID() string {
 
 // Status of this connection, should be true initially, then false after Wait().
 func (c *conn) Connected() bool {
-	return c.connected
+	return c.connected.Load()
 }
 
 // Read the current version
@@ -94,7 +94,11 @@ func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 	} else if r.Header.Get("Accept") == "text/event-stream" {
 		c.transport = &eventSourceTransport{writeTimeout: c.state.WriteTimeout}
 	} else if r.Header.Get("Upgrade") == "websocket" {
-		c.transport = &websocketsTransport{writeTimeout: c.state.WriteTimeout}
+		c.transport = &websocketsTransport{
+			writeTimeout:   c.state.WriteTimeout,
+			maxMessageSize: c.state.MaxWebSocketMessageSize,
+			checkOrigin:    c.state.CheckOrigin,
+		}
 	} else {
 		return fmt.Errorf("invalid sync request")
 	}
@@ -110,7 +114,7 @@ func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 		return &responseCommittedError{err: fmt.Errorf("failed to send initial event: %w", err)}
 	}
 	//successfully connected
-	c.connected = true
+	c.connected.Store(true)
 	c.connectedAt = time.Now()
 	c.waiter.Add(1)
 	//while connected, ping loop (every 25s, browser timesout after 30s)
@@ -126,7 +130,7 @@ func (c *conn) connect(w http.ResponseWriter, r *http.Request) error {
 			}
 		}
 	disconnected:
-		c.connected = false
+		c.connected.Store(false)
 		c.Close()
 		//unblock waiters
 		c.waiter.Done()
@@ -243,10 +247,17 @@ func (c *conn) send(upd *Update) error {
 	if err := c.transport.send(upd); err != nil {
 		return err
 	}
-	// mark new current version
-	c.version = upd.Version
-	if upd.Root != "" {
-		c.baseHash = upd.Root
+	// Pings are transport keepalives, not state updates. Treating their omitted
+	// version as zero used to make every ping reset this connection's progress,
+	// which disables v2 deltas and causes redundant v3 replays on the next Push.
+	if !upd.Ping {
+		c.version = upd.Version
+		// A v3 clear deliberately carries an empty root. It must replace the
+		// old base just as a non-empty root does; retaining it would make the
+		// next restored document patch against a tree the client cleared.
+		if c.proto >= 3 {
+			c.baseHash = upd.Root
+		}
 	}
 	return nil
 }

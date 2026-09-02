@@ -2,6 +2,13 @@ const EventSourceTransport = require("./transport-sse");
 const WebSocketTransport = require("./transport-ws");
 
 let connectionCount = 0;
+const ROOT_HASH_RE = /^[0-9a-f]{32}$/;
+
+function isSafeNonNegativeInteger(value) {
+  return typeof value === "string" &&
+    /^(?:0|[1-9]\d*)$/.test(value) &&
+    Number.isSafeInteger(Number(value));
+}
 
 //Connection joins a given request to a sync state
 module.exports = class Connection {
@@ -18,6 +25,13 @@ module.exports = class Connection {
   }
 
   async setup(req, res) {
+    // SSE and WebSocket upgrades are GET-only. Reject other methods before a
+    // transport is allocated so an endpoint mounted without Express's app.get
+    // does not accidentally accept stateful-looking writes.
+    if (req.method !== "GET") {
+      res.status(405).send("Method Not Allowed");
+      return false;
+    }
     if (req.headers["accept"] === "text/event-stream") {
       this.transport = new EventSourceTransport(req, res);
     } else if (req.headers["upgrade"] === "websocket") {
@@ -32,16 +46,16 @@ module.exports = class Connection {
     //optionally set specific version. A mismatched id means a different state
     //object, so the client's version and resume token are meaningless.
     if (this.state.id === req.query.id) {
-      if (/^\d+$/.test(req.query.v)) {
-        this.version = parseInt(req.query.v, 10);
+      if (isSafeNonNegativeInteger(req.query.v) && Number(req.query.v) > 0) {
+        this.version = Number(req.query.v);
       }
-      if (/^[0-9a-f]+$/.test(req.query.h || "")) {
+      if (typeof req.query.h === "string" && ROOT_HASH_RE.test(req.query.h)) {
         this.baseHash = req.query.h;
       }
     }
     //protocol negotiation: absent or older than 3 is served v2 unchanged
-    if (/^\d+$/.test(req.query.p || "")) {
-      this.proto = Math.min(parseInt(req.query.p, 10), 3);
+    if (isSafeNonNegativeInteger(req.query.p) && Number(req.query.p) > 0) {
+      this.proto = Math.min(Number(req.query.p), 3);
     }
     this.debug("setup", req.query);
     this.connected = true;
@@ -67,11 +81,24 @@ module.exports = class Connection {
   }
 
   async keepAlive() {
-    return this.transport.write({ping: true});
+    try {
+      await this.transport.write({ping: true});
+    } catch (err) {
+      // Timers do not observe rejected promises. Close a failed stream here
+      // rather than leaving an unhandled rejection and a dead subscriber.
+      this.debug("keepalive failed", err);
+      if (this.transport && typeof this.transport.close === "function") {
+        this.transport.close();
+      }
+    }
   }
 
   async push() {
-    if (this.version === this.state.version) {
+    //Version alone is not evidence a v3 client holds this document: an old
+    //client, corrupt persistence, or a hostile reconnect can pair a current
+    //version with no (or another) root. Send a snapshot in that case.
+    if (this.version === this.state.version &&
+      (this.proto < 3 || this.baseHash === this.state.rootHash)) {
       return; //already up to date
     }
     if (this.pushing) {
@@ -79,72 +106,91 @@ module.exports = class Connection {
       return;
     }
     this.pushing = true;
-    //build update for this connection. The state can move on while the write
-    //below is awaited, so record what was actually sent, not whatever the
-    //state holds once the write returns.
-    let sentVersion = this.state.version;
-    let sentRoot = this.state.rootHash;
-    let id = undefined;
-    if (this.writes === 0) {
-      id = this.state.id;
-    }
-    let payload;
-    if (this.proto >= 3) {
-      //a client whose base is still retained gets operations against it, however
-      //many versions behind it has fallen; anything else takes the document
-      let ops = this.state.opsFor(this.baseHash);
-      let useOps = ops !== null && ops.length < this.state.json.length;
-      let update = {
-        id: id,
-        version: sentVersion,
-        proto: this.writes === 0 ? 3 : undefined,
-        root: sentRoot,
-        base: useOps ? this.baseHash : undefined,
-        ops: null
-      };
-      payload = JSON.stringify(update).replace(
-        /"ops":null\}$/,
-        useOps ? `"ops":${ops}}` : `"body":${this.state.json}}`
-      );
-    } else {
-      let delta = undefined;
-      let deltaJson = null;
-      //the v2 projection is computed on first use and memoised in the state
-      if (this.version === this.state.version - 1) {
-        deltaJson = this.state.deltaV2();
+    let sent = false;
+    try {
+      //build update for this connection. The state can move on while the write
+      //below is awaited, so record what was actually sent, not whatever the
+      //state holds once the write returns.
+      let sentVersion = this.state.version;
+      let sentRoot = this.state.rootHash;
+      let id = undefined;
+      if (this.writes === 0) {
+        id = this.state.id;
       }
-      if (deltaJson && deltaJson.length < this.state.json.length) {
-        delta = true;
-      }
+      let payload;
+      if (this.proto >= 3) {
+        //a client whose base is still retained gets operations against it, however
+        //many versions behind it has fallen; anything else takes the document
+        let sameRoot = this.baseHash !== "" && this.baseHash === sentRoot;
+        //The root is authoritative. If content is already identical but the
+        //untrusted version is not, send an explicit no-op to repair only that
+        //metadata; a snapshot is needlessly large and makes replay handling
+        //less precise for clients.
+        let ops = sameRoot ? "[]" : this.state.opsFor(this.baseHash);
+        let useOps = sameRoot || (ops !== null && ops.length < this.state.json.length);
+        let update = {
+          id: id,
+          version: sentVersion,
+          proto: this.writes === 0 ? 3 : undefined,
+          root: sentRoot,
+          base: useOps ? this.baseHash : undefined,
+          ops: null
+        };
+        payload = JSON.stringify(update).replace(
+          /"ops":null\}$/,
+          useOps ? `"ops":${ops}}` : `"body":${this.state.json}}`
+        );
+      } else {
+        let delta = undefined;
+        let deltaJson = null;
+        //the v2 projection is computed on first use and memoised in the state
+        if (this.version === this.state.version - 1) {
+          deltaJson = this.state.deltaV2();
+        }
+        if (deltaJson && deltaJson.length < this.state.json.length) {
+          delta = true;
+        }
 
-      let update = {
-        id: id,
-        version: sentVersion,
-        delta: delta,
-        body: null
-      };
-      //string replace to make use of cached json payload
-      let body = delta ? deltaJson : this.state.json;
-      payload = JSON.stringify(update).replace(
-        /"body":null\}$/,
-        `"body":${body}}`
-      );
-    }
-    this.debug("write msg#" + this.writes + " " + payload.length + "bytes");
-    //write onto the wire!
-    await this.transport.write(payload);
-    this.writes++;
-    //success — recorded only after the write, so a failed send does not leave
-    //the connection claiming the client holds a root it never received
-    this.version = sentVersion;
-    if (this.proto >= 3) {
-      this.baseHash = sentRoot;
-    }
-    //cleanup
-    this.pushing = false;
-    if (this.queued) {
-      this.queued = false;
-      this.push();
+        let update = {
+          id: id,
+          version: sentVersion,
+          delta: delta,
+          body: null
+        };
+        //string replace to make use of cached json payload
+        let body = delta ? deltaJson : this.state.json;
+        payload = JSON.stringify(update).replace(
+          /"body":null\}$/,
+          `"body":${body}}`
+        );
+      }
+      this.debug("write msg#" + this.writes + " " + payload.length + "bytes");
+      //write onto the wire!
+      await this.transport.write(payload);
+      this.writes++;
+      //success — recorded only after the write, so a failed send does not leave
+      //the connection claiming the client holds a root it never received
+      this.version = sentVersion;
+      if (this.proto >= 3) {
+        this.baseHash = sentRoot;
+      }
+      sent = true;
+    } catch (err) {
+      //State calls push without awaiting it. Never leave the connection marked
+      //as pushing after a failed write (which would suppress every later
+      //update), and close the transport that cannot carry a repair.
+      this.debug("write failed", err);
+      if (this.transport && typeof this.transport.close === "function") {
+        this.transport.close();
+      }
+    } finally {
+      this.pushing = false;
+      if (sent && this.queued) {
+        this.queued = false;
+        void this.push();
+      } else {
+        this.queued = false;
+      }
     }
   }
 

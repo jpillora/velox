@@ -13,15 +13,45 @@
 //
 //Path elements are strings for object keys and numbers for array indices, so a
 //numeric-looking object key never collides with an index.
+const owns = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+
+function setOwn(obj, key, value) {
+  // __proto__ assignment has setter semantics on ordinary objects. Protocol
+  // data must not be able to change the prototype of the local document.
+  if (key === "__proto__") {
+    Object.defineProperty(obj, key, {
+      value: value,
+      writable: true,
+      enumerable: true,
+      configurable: true
+    });
+  } else {
+    obj[key] = value;
+  }
+}
+
+function invalidPath(path, depth) {
+  return new Error("velox: path escapes the document at " + path.slice(0, depth).join("."));
+}
+
 function resolve(node, path, depth) {
   for (let i = 0; i < depth; i++) {
     if (node === null || typeof node !== "object") {
-      throw new Error("velox: path escapes the document at " + path.slice(0, i).join("."));
+      throw invalidPath(path, i);
     }
-    node = node[path[i]];
+    let key = path[i];
+    if (Array.isArray(node)) {
+      if (!Number.isSafeInteger(key) || key < 0 || key >= node.length) {
+        throw invalidPath(path, i + 1);
+      }
+    } else if (typeof key !== "string" || !owns(node, key)) {
+      // Do not resolve inherited properties such as __proto__ or constructor.
+      throw invalidPath(path, i + 1);
+    }
+    node = node[key];
   }
   if (node === null || typeof node !== "object") {
-    throw new Error("velox: path escapes the document at " + path.join("."));
+    throw invalidPath(path, path.length);
   }
   return node;
 }
@@ -32,20 +62,39 @@ module.exports = function applyOps(root, ops) {
   }
   for (let i = 0; i < ops.length; i++) {
     let op = ops[i];
+    if (!Array.isArray(op)) {
+      throw new Error("velox: operation " + i + " is not an array");
+    }
     let kind = op[0];
     let path = op[1];
     if (!Array.isArray(path)) {
       throw new Error("velox: operation " + i + " has no path");
     }
+    // $-prefixed properties belong to the embedding application (for example
+    // Angular metadata) and are outside the synchronised document. Ignore an
+    // operation targeting any part of that private tree rather than rejecting
+    // the whole update and forcing a reconnect loop.
+    if (path.some(key => typeof key === "string" && key[0] === "$")) {
+      continue;
+    }
     if (kind === "n") {
+      if (op.length !== 3) {
+        throw new Error("velox: invalid truncate operation");
+      }
       let target = resolve(root, path, path.length);
       if (!Array.isArray(target)) {
         throw new Error("velox: truncate outside an array");
+      }
+      if (!Number.isSafeInteger(op[2]) || op[2] < 0) {
+        throw new Error("velox: invalid truncate length");
       }
       target.length = op[2];
       continue;
     }
     if (kind === "x") {
+      if (op.length !== 4 && op.length !== 5) {
+        throw new Error("velox: invalid splice operation");
+      }
       let target = resolve(root, path, path.length);
       if (!Array.isArray(target)) {
         throw new Error("velox: splice outside an array");
@@ -78,15 +127,34 @@ module.exports = function applyOps(root, ops) {
     let parent = resolve(root, path, path.length - 1);
     let last = path[path.length - 1];
     if (kind === "s") {
+      if (op.length !== 3) {
+        throw new Error("velox: invalid set operation");
+      }
       //assigning at the current length is how a grown array is expressed
-      parent[last] = op[2];
+      if (Array.isArray(parent)) {
+        if (!Number.isSafeInteger(last) || last < 0 || last > parent.length) {
+          throw new Error("velox: invalid array index");
+        }
+        parent[last] = op[2];
+      } else {
+        if (typeof last !== "string") {
+          throw new Error("velox: object key is not a string");
+        }
+        setOwn(parent, last, op[2]);
+      }
     } else if (kind === "d") {
+      if (op.length !== 2) {
+        throw new Error("velox: invalid delete operation");
+      }
       //Arrays are only ever changed by assignment and truncation. A delete at
       //an index has no meaning — removing an element renumbers everything after
       //it, which the encoder expresses as assignments plus a length — and
       //JavaScript would honour it by leaving a hole rather than refusing.
       if (Array.isArray(parent)) {
         throw new Error("velox: delete against an array index");
+      }
+      if (typeof last !== "string") {
+        throw new Error("velox: object key is not a string");
       }
       delete parent[last];
     } else {

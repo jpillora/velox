@@ -1268,6 +1268,107 @@ func TestServeHTTPPreCommitFailureStillWritesHTTPError(t *testing.T) {
 	}
 }
 
+func TestHandleRequiresGET(t *testing.T) {
+	s := New(func() (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
+	controlled := newControlledTransport()
+	s.transportFactory = func(*http.Request) transport { return controlled }
+
+	_, err := s.Handle(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "http://example.test/sync", nil))
+	var methodErr *methodNotAllowedError
+	if !errors.As(err, &methodErr) {
+		t.Fatalf("Handle error = %v, want rejected method", err)
+	}
+	if got := controlled.sendCalls.Load(); got != 0 {
+		t.Fatalf("transport was used for a POST: sends = %d", got)
+	}
+	recorder := httptest.NewRecorder()
+	s.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "http://example.test/sync", nil))
+	if recorder.Code != http.StatusMethodNotAllowed || recorder.Header().Get("Allow") != http.MethodGet {
+		t.Fatalf("POST response = %d Allow=%q, want 405 and GET", recorder.Code, recorder.Header().Get("Allow"))
+	}
+}
+
+func TestResumeTokenValidationRejectsMalformedAndDoesNotCacheUnknown(t *testing.T) {
+	s := New(func() (json.RawMessage, error) { return json.RawMessage(`{"value":1}`), nil })
+
+	for _, token := range []string{"", "not-a-hash", strings.Repeat("a", rootHashLen-1), strings.Repeat("A", rootHashLen), strings.Repeat("g", rootHashLen)} {
+		if validRootHash(token) {
+			t.Fatalf("validRootHash(%q) = true, want false", token)
+		}
+	}
+	if !validRootHash(s.data.rootHash) {
+		t.Fatalf("published root %q was not accepted", s.data.rootHash)
+	}
+
+	s.data.mut.RLock()
+	defer s.data.mut.RUnlock()
+	for _, token := range []string{strings.Repeat("a", rootHashLen-1), strings.Repeat("f", rootHashLen)} {
+		if _, ok := s.opsFor(token); ok {
+			t.Fatalf("opsFor(%q) reported an unknown base", token)
+		}
+	}
+	if s.data.patchCache != nil {
+		t.Fatalf("unknown resume tokens populated patch cache: %#v", s.data.patchCache)
+	}
+}
+
+func TestWebsocketRejectsCrossOriginUpgrade(t *testing.T) {
+	s := New(func() (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
+	var serverLogs bytes.Buffer
+	server := httptest.NewUnstartedServer(s)
+	server.Config.ErrorLog = log.New(&serverLogs, "", 0)
+	server.Start()
+	defer server.Close()
+
+	ws, response, err := websocket.DefaultDialer.Dial(websocketURL(server.URL), http.Header{"Origin": {"https://attacker.example"}})
+	if ws != nil {
+		ws.Close()
+	}
+	if err == nil {
+		t.Fatal("cross-origin websocket upgrade succeeded")
+	}
+	if response == nil || response.StatusCode != http.StatusForbidden {
+		status := 0
+		if response != nil {
+			status = response.StatusCode
+		}
+		t.Fatalf("cross-origin upgrade status = %d, want %d", status, http.StatusForbidden)
+	}
+	if logs := serverLogs.String(); strings.Contains(logs, "superfluous") {
+		t.Fatalf("origin rejection appended a second HTTP response: %s", logs)
+	}
+}
+
+func TestWebsocketCanOptIntoCrossOriginUpgrade(t *testing.T) {
+	s := New(func() (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
+	s.CheckOrigin = func(r *http.Request) bool {
+		return r.Header.Get("Origin") == "https://allowed.example"
+	}
+	server := httptest.NewServer(s)
+	defer server.Close()
+
+	ws, _, err := websocket.DefaultDialer.Dial(websocketURL(server.URL), http.Header{"Origin": {"https://allowed.example"}})
+	if err != nil {
+		t.Fatalf("configured cross-origin websocket upgrade failed: %v", err)
+	}
+	defer ws.Close()
+}
+
+func TestWebsocketReadLimitRejectsOversizedInboundMessage(t *testing.T) {
+	s := New(func() (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
+	server := httptest.NewServer(s)
+	defer server.Close()
+
+	ws := dialStateWebsocket(t, server.URL)
+	defer ws.Close()
+	readUpdate(t, ws, true)
+	readUpdate(t, ws, false)
+	if err := ws.WriteMessage(websocket.TextMessage, bytes.Repeat([]byte{'x'}, int(DefaultMaxWebSocketMessageSize+1))); err != nil {
+		t.Fatalf("write oversized message: %v", err)
+	}
+	waitForConnections(t, s, 0)
+}
+
 func TestReconnectAfterIdlePushReceivesCurrentFirstState(t *testing.T) {
 	var value atomic.Int64
 	var calls atomic.Int32

@@ -10,24 +10,37 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// DefaultMaxWebSocketMessageSize is the maximum inbound WebSocket data frame
+// accepted by a State unless State.MaxWebSocketMessageSize overrides it. The
+// protocol has no client-to-server data messages beyond a tiny keepalive.
+const DefaultMaxWebSocketMessageSize int64 = 1024
+
 var defaultUpgrader = websocket.Upgrader{
 	ReadBufferSize:    1024,
 	WriteBufferSize:   1024,
 	EnableCompression: true,
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
 }
 
 type websocketsTransport struct {
-	writeTimeout time.Duration
-	conn         *websocket.Conn
+	writeTimeout   time.Duration
+	maxMessageSize int64
+	checkOrigin    func(*http.Request) bool
+	conn           *websocket.Conn
 }
 
 func (ws *websocketsTransport) connect(w http.ResponseWriter, r *http.Request) error {
-	conn, err := defaultUpgrader.Upgrade(w, r, nil)
+	// Copy before applying a State-specific policy: the package-level upgrader
+	// is shared by concurrent connections and must retain its safe default.
+	upgrader := defaultUpgrader
+	if ws.checkOrigin != nil {
+		upgrader.CheckOrigin = ws.checkOrigin
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		return fmt.Errorf("[velox] cannot upgrade connection: %s", err)
+		// Upgrader writes its own HTTP status for every failed handshake (most
+		// importantly a rejected Origin). Mark that response as committed so
+		// State.ServeHTTP does not append a misleading 500 afterwards.
+		return &responseCommittedError{err: fmt.Errorf("[velox] cannot upgrade connection: %w", err)}
 	}
 	conn.EnableWriteCompression(true)
 	conn.SetCompressionLevel(gzip.BestSpeed)
@@ -41,6 +54,14 @@ func (ws *websocketsTransport) send(upd *Update) error {
 }
 
 func (ws *websocketsTransport) wait() error {
+	// Inbound payloads are ignored; without a limit an unauthenticated peer can
+	// make ReadMessage allocate its chosen size merely to keep the connection
+	// alive. Gorilla applies this limit before handing the payload to us.
+	limit := ws.maxMessageSize
+	if limit <= 0 {
+		limit = DefaultMaxWebSocketMessageSize
+	}
+	ws.conn.SetReadLimit(limit)
 	//block on connection
 	for {
 		//ws is bi-directional, so we can rely on pings

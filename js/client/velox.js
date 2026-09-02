@@ -15,6 +15,10 @@ const PING_OUT_INTERVAL = 25 * 1000;
 const SLEEP_CHECK = 5 * 1000;
 const SLEEP_THRESHOLD = 30 * 1000;
 const MAX_RETRY_DELAY = 10 * 1000;
+// Resume tokens are opaque, but the built-in servers use short fixed-size
+// hashes. Keep a hostile peer from turning a received token into an unbounded
+// reconnect URL or persisted localStorage entry.
+const MAX_RESUME_TOKEN_LENGTH = 256;
 const IS_BROWSER = typeof window === "object";
 const IS_NODE = typeof global === "object";
 const WS = Symbol("WS");
@@ -22,6 +26,15 @@ const SSE = Symbol("SSE");
 const root = IS_BROWSER ? window : IS_NODE ? global : null;
 if (!root) {
   throw "where am i...";
+}
+
+function clearSyncedProperties(obj) {
+  // A null State is represented by an empty update on the Go wire. Keep
+  // application-owned $ fields just as resync() does, but remove every field
+  // that could have come from the synchronised document.
+  for (const key of Object.keys(obj)) {
+    if (key[0] !== "$") delete obj[key];
+  }
 }
 
 //helpers
@@ -222,20 +235,94 @@ class Velox {
       this.pingin();
       return;
     }
-    if (update.id) {
-      //a different state id means a different server; anything persisted for
-      //the old one is meaningless
-      if (this.id && this.id !== update.id && this.store) {
-        this.store.clear();
-      }
-      this.id = update.id;
-    }
-    if (!this.obj || (!update.body && !update.ops)) {
-      this.onerror("null objects");
+
+    const owns = (key) => Object.prototype.hasOwnProperty.call(update, key);
+    const hasBody = owns("body");
+    const hasOps = owns("ops");
+    const isV3 = owns("proto") || owns("root") || owns("base") || hasOps;
+    // Go uses an omitted body to represent a null State. Accept body:null as
+    // the equivalent explicit spelling used by other implementations.
+    const isClear = (!hasBody && !hasOps && !update.delta) ||
+      (hasBody && !hasOps && update.body === null && !update.delta);
+    const fail = (reason) => {
+      this.resync(reason instanceof Error ? reason : new Error(String(reason)));
+    };
+
+    // A message must have exactly one state representation. In particular,
+    // [] is a meaningful v3 no-op used to advance the version when a state
+    // returns to a root the client already has, so truthiness is insufficient.
+    if (!this.obj || (!isClear && hasBody === hasOps)) {
+      fail("velox: update must contain exactly one of body or ops");
       return;
     }
+
+    if (!Number.isSafeInteger(update.version) || update.version <= 0) {
+      fail("velox: invalid update version");
+      return;
+    }
+    if (owns("id") && (typeof update.id !== "string" || update.id.length === 0 || update.id.length > MAX_RESUME_TOKEN_LENGTH)) {
+      fail("velox: invalid state id");
+      return;
+    }
+    if (isV3 && !isClear) {
+      if (typeof update.root !== "string" || update.root.length === 0 || update.root.length > MAX_RESUME_TOKEN_LENGTH) {
+        fail("velox: invalid v3 root");
+        return;
+      }
+      if (hasOps && (typeof update.base !== "string" || update.base.length > MAX_RESUME_TOKEN_LENGTH || !Array.isArray(update.ops))) {
+        fail("velox: invalid v3 operations");
+        return;
+      }
+    }
+    if (!isClear && hasBody && (update.body === null || typeof update.body !== "object" || Array.isArray(update.body))) {
+      fail("velox: full state is not an object");
+      return;
+    }
+    if (update.delta && (!hasBody || update.body === null || typeof update.body !== "object" || Array.isArray(update.body))) {
+      fail("velox: invalid delta");
+      return;
+    }
+
+    const changedState = owns("id") && this.id && this.id !== update.id;
+    const heldVersion = changedState ? 0 : this.version;
+    // SSE is ordered, but old EventSource instances and hostile intermediaries
+    // can still deliver an already-applied or stale frame. Never let either
+    // roll the local state backwards; a duplicate is already represented by
+    // the state we hold.
+    // A server can legitimately correct a forged/future persisted version
+    // without changing the document: Go sends an empty operation list when
+    // the echoed root already is current. Root equality makes this safe; every
+    // other lower/equal frame is a replay and is ignored.
+    const versionCorrection = isV3 && hasOps && update.ops.length === 0 &&
+      update.base === this.root && update.root === this.root;
+    if (heldVersion > 0 && update.version <= heldVersion && !versionCorrection) {
+      return;
+    }
+    if (!this.id && !owns("id")) {
+      fail("velox: initial update has no state id");
+      return;
+    }
+    if (changedState && hasOps) {
+      // A patch against a different server's tree is never meaningful, even
+      // if an opaque token happens to collide with the previous one.
+      fail("velox: operations arrived with a new state id");
+      return;
+    }
+    if (changedState) {
+      // A different state id means a different server; anything persisted for
+      // the old one is meaningless, as are its version and resume token.
+      if (this.store) this.store.clear();
+      this.version = 0;
+      this.root = "";
+    }
+    if (owns("id")) this.id = update.id;
+
     //perform update
-    if (update.ops) {
+    if (isClear) {
+      clearSyncedProperties(this.obj);
+      this.root = "";
+      if (this.store) this.store.clear();
+    } else if (hasOps) {
       //protocol v3: an ordered operation list against the tree named by base.
       //Hashes are opaque, so the base is the only evidence that the server is
       //patching the document we actually hold. Applying operations to the wrong
@@ -261,7 +348,7 @@ class Velox {
     } else {
       merge(this.obj, update.body);
     }
-    if (update.root !== undefined) {
+    if (isV3 && !isClear) {
       this.root = update.root;
     }
     //auto-angular
@@ -310,10 +397,7 @@ class Velox {
   //state id happened to rotate, and with persistence enabled, across reloads
   //too.
   resync(reason) {
-    for (let k in this.obj) {
-      //$-prefixed properties belong to the caller, not to the synced document
-      if (k[0] !== "$") delete this.obj[k];
-    }
+    clearSyncedProperties(this.obj);
     this.version = 0;
     this.root = "";
     if (this.store) this.store.clear();

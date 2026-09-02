@@ -1,9 +1,11 @@
 package velox
 
 import (
+	"bufio"
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +17,111 @@ import (
 
 	"github.com/jpillora/eventsource"
 )
+
+// DefaultMaxEventSize bounds one decoded server-sent event. The bound is on
+// decompressed bytes as well, so it also prevents a compressed response from
+// expanding without limit in a client process.
+const DefaultMaxEventSize = 16 << 20
+
+// ErrEventTooLarge is returned when a peer sends an SSE event larger than the
+// configured Client.MaxEventSize.
+var ErrEventTooLarge = errors.New("velox: SSE event exceeds configured limit")
+
+type eventDecoder interface {
+	Decode(*eventsource.Event) error
+}
+
+// boundedSSEDecoder is the small subset of eventsource.Decoder the client
+// needs, with a per-event byte cap. eventsource.Decoder uses ReadString, whose
+// unbounded allocation makes a malicious `data:` line enough to exhaust a
+// client before it can inspect the event.
+type boundedSSEDecoder struct {
+	r   *bufio.Reader
+	max int
+}
+
+func newBoundedSSEDecoder(r io.Reader, max int) *boundedSSEDecoder {
+	if max <= 0 {
+		max = DefaultMaxEventSize
+	}
+	// Keep the idle allocation small. readLine joins ReadSlice fragments only
+	// for the event actually being received, and stops once its cap is reached.
+	return &boundedSSEDecoder{r: bufio.NewReaderSize(r, 32<<10), max: max}
+}
+
+func (d *boundedSSEDecoder) readLine() ([]byte, error) {
+	var line []byte
+	for {
+		part, err := d.r.ReadSlice('\n')
+		if len(part) > d.max-len(line) {
+			return nil, ErrEventTooLarge
+		}
+		line = append(line, part...)
+		if err == nil {
+			return line, nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return nil, err
+	}
+}
+
+func (d *boundedSSEDecoder) Decode(event *eventsource.Event) error {
+	if event == nil {
+		return errors.New("event is nil")
+	}
+	*event = eventsource.Event{}
+	var total int
+	var hasData bool
+	for {
+		line, err := d.readLine()
+		if err != nil {
+			return err
+		}
+		total += len(line)
+		if total > d.max {
+			return ErrEventTooLarge
+		}
+		if len(line) > 0 && line[len(line)-1] == '\n' {
+			line = line[:len(line)-1]
+		}
+		if len(line) > 0 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+		if len(line) == 0 {
+			return nil
+		}
+		if line[0] == ':' {
+			continue
+		}
+		colon := 0
+		for colon < len(line) && line[colon] != ':' {
+			colon++
+		}
+		field, value := line, []byte(nil)
+		if colon < len(line) {
+			field, value = line[:colon], line[colon+1:]
+			if len(value) > 0 && value[0] == ' ' {
+				value = value[1:]
+			}
+		}
+		switch string(field) {
+		case "id":
+			event.ID = string(value)
+		case "event":
+			event.Type = string(value)
+		case "retry":
+			event.Retry = string(value)
+		case "data":
+			if hasData {
+				event.Data = append(event.Data, '\n')
+			}
+			event.Data = append(event.Data, value...)
+			hasData = true
+		}
+	}
+}
 
 // Client connects to a Velox server and keeps a local struct in sync.
 type Client[T any] struct {
@@ -35,6 +142,10 @@ type Client[T any] struct {
 	MinRetryDelay time.Duration
 	// MaxRetryDelay is the maximum retry delay (default: 10s)
 	MaxRetryDelay time.Duration
+	// MaxEventSize is the maximum decompressed size of one server-sent event
+	// (default: DefaultMaxEventSize). A connection is dropped when a server
+	// exceeds it rather than allowing one event to allocate unbounded memory.
+	MaxEventSize int
 
 	// internal state
 	mu        sync.Mutex
@@ -46,7 +157,7 @@ type Client[T any] struct {
 	root      string         // opaque v3 resume token for the state we hold
 	connected bool
 	body      io.ReadCloser
-	dec       *eventsource.Decoder
+	dec       eventDecoder
 	cancel    context.CancelFunc
 	done      chan struct{}
 }
@@ -71,6 +182,7 @@ func NewClient[T any](url string, data *T) (*Client[T], error) {
 		Retry:         true,
 		MinRetryDelay: 100 * time.Millisecond,
 		MaxRetryDelay: 10 * time.Second,
+		MaxEventSize:  DefaultMaxEventSize,
 	}
 
 	if se, ok := any(data).(stateEmbedded); ok && se.self().Locker != nil {
@@ -108,13 +220,28 @@ func (c *Client[T]) Connected() bool {
 // it will automatically reconnect on connection failures.
 func (c *Client[T]) Connect(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
 	c.mu.Lock()
+	if c.done != nil {
+		c.mu.Unlock()
+		cancel()
+		return fmt.Errorf("velox: client is already connecting")
+	}
 	c.cancel = cancel
-	c.done = make(chan struct{})
+	c.done = done
 	c.mu.Unlock()
 
 	defer func() {
-		close(c.done)
+		c.mu.Lock()
+		// Do not let a finished connection clear a later connection's lifecycle
+		// state. Connect currently rejects overlap, but keeping this ownership
+		// check makes the cleanup safe if that policy changes.
+		if c.done == done {
+			c.cancel = nil
+			c.done = nil
+			close(done)
+		}
+		c.mu.Unlock()
 	}()
 
 	retryDelay := c.MinRetryDelay
@@ -244,7 +371,7 @@ func (c *Client[T]) connectOnce(ctx context.Context) error {
 
 	c.mu.Lock()
 	c.body = resp.Body
-	c.dec = eventsource.NewDecoder(bodyReader)
+	c.dec = newBoundedSSEDecoder(bodyReader, c.MaxEventSize)
 	c.connected = true
 	c.mu.Unlock()
 
@@ -311,133 +438,225 @@ func (c *Client[T]) readEvents(ctx context.Context) error {
 			return fmt.Errorf("failed to unmarshal update: %w", err)
 		}
 
-		// Handle ping
 		if update.Ping {
 			continue
 		}
-
-		// Update metadata
-		c.mu.Lock()
-		if update.ID != "" {
-			if c.id != "" && c.id != update.ID {
-				// A different state id means a different server, so the token we
-				// hold names a tree it knows nothing about.
-				c.root = ""
-			}
-			c.id = update.ID
-		}
-		if update.Version > 0 {
-			c.version = update.Version
-		}
-
-		// Apply update to internal state tracker
-		var newState json.RawMessage
-		if len(update.Body) == 0 && len(update.Ops) == 0 {
-			// Treat empty body as explicit state clear
-			c.stateMap = nil
-			c.root = ""
-		} else if len(update.Ops) > 0 {
-			// Protocol v3: an ordered operation list against the tree we hold.
-			// Hashes are opaque, so the base is the only evidence that the server
-			// is patching the document we actually have. Operations applied to the
-			// wrong base can succeed and leave us silently wrong, so anything
-			// unexpected resyncs rather than carrying on.
-			var err error
-			if c.stateMap == nil || update.Base != c.root {
-				err = fmt.Errorf("operations apply to %q, not the state held", update.Base)
-			}
-			var ops []op
-			if err == nil {
-				err = json.Unmarshal(update.Ops, &ops)
-			}
-			if err == nil {
-				var updated any
-				if updated, err = applyOps(any(c.stateMap), ops); err == nil {
-					var ok bool
-					if c.stateMap, ok = updated.(map[string]any); !ok {
-						err = fmt.Errorf("operations replaced the root")
-					}
-				}
-			}
-			if err == nil {
-				newState, err = json.Marshal(c.stateMap)
-			}
-			if err != nil {
-				// A diverged document cannot be repaired from a patch stream.
-				// Drop it and return, so the retry loop reconnects and is served a
-				// full snapshot.
-				c.stateMap = nil
-				c.root = ""
-				c.version = 0
-				c.mu.Unlock()
-				if c.OnError != nil {
-					c.OnError(fmt.Errorf("velox: resyncing: %w", err))
-				}
-				return fmt.Errorf("velox: state diverged: %w", err)
-			}
-		} else if update.Delta && c.stateMap != nil {
-			// Apply delta patch in-place using mergeObjects (zero-alloc)
-			var patchMap map[string]any
-			if err := json.Unmarshal(update.Body, &patchMap); err != nil {
-				c.mu.Unlock()
-				if c.OnError != nil {
-					c.OnError(fmt.Errorf("failed to unmarshal patch: %w", err))
-				}
-				continue
-			}
-			mergeObjects(c.stateMap, patchMap)
-			// Marshal the updated map to bytes for struct unmarshal
-			merged, err := json.Marshal(c.stateMap)
-			if err != nil {
-				c.mu.Unlock()
-				if c.OnError != nil {
-					c.OnError(fmt.Errorf("failed to marshal state: %w", err))
-				}
-				continue
-			}
-			newState = merged
-		} else {
-			// Full state replacement — cache as map for future deltas
-			var m map[string]any
-			if err := json.Unmarshal(update.Body, &m); err == nil {
-				c.stateMap = m
-			}
-			newState = update.Body
-		}
-		if update.Root != "" {
-			c.root = update.Root
-		}
-		c.mu.Unlock()
-
-		// Apply to user's data struct (with locking if supported)
-		// Zero all serializable fields before unmarshaling to ensure fields
-		// removed from the stateMap (via omitzero/omitempty) are properly cleared.
-		if len(newState) > 0 {
-			if c.locker != nil {
-				c.locker.Lock()
-			}
-			clearForUnmarshal(c.data)
-			if err := json.Unmarshal(newState, c.data); err != nil {
-				if c.locker != nil {
-					c.locker.Unlock()
-				}
-				if c.OnError != nil {
-					c.OnError(fmt.Errorf("failed to unmarshal into data: %w", err))
-				}
-				continue
-			}
-			// Bind all VMap/VSlice fields (nil pusher on client)
-			bindAll(c.data, c.locker, nil)
-			if c.locker != nil {
-				c.locker.Unlock()
-			}
-
-			// Notify update (outside lock)
-			if c.OnUpdate != nil {
-				c.OnUpdate()
-			}
+		if err := c.applyUpdate(update); err != nil {
+			return err
 		}
 	}
+}
+
+// applyUpdate validates and applies one non-ping update as one recovery unit.
+// A failed patch must never advance the resume metadata: a v2 server only
+// considers the version on reconnect, so advertising an unapplied delta would
+// make it believe the client was current forever.
+func (c *Client[T]) applyUpdate(update *Update) error {
+	c.mu.Lock()
+	if update.Version <= 0 {
+		c.clearResumeLocked()
+		c.mu.Unlock()
+		return fmt.Errorf("velox: update has no version")
+	}
+
+	identityChanged := update.ID != "" && c.id != "" && update.ID != c.id
+	if !identityChanged {
+		switch {
+		case update.Version < c.version:
+			// A client can persist a forged/future version alongside the genuine
+			// root it holds. The server corrects that exact case with a lower
+			// version and an empty v3 patch. It is safe to accept because both the
+			// base and target prove the document is unchanged. Every other lower
+			// message might be a stale replay, so resync instead of rolling back.
+			if isNoopForHeldRoot(update, c.root) {
+				c.version = update.Version
+				c.mu.Unlock()
+				return nil
+			}
+			previousVersion := c.version
+			c.clearResumeLocked()
+			c.mu.Unlock()
+			return fmt.Errorf("velox: stale update version %d after %d", update.Version, previousVersion)
+		case update.Version == c.version:
+			// A v3 duplicate names the root already held. Its Base names the root
+			// before the original update, so trying to apply it again would look
+			// like divergence. A v2 same-version message is likewise a duplicate.
+			if len(update.Ops) == 0 || update.Root == c.root {
+				c.mu.Unlock()
+				return nil
+			}
+			c.clearResumeLocked()
+			c.mu.Unlock()
+			return fmt.Errorf("velox: version %d names unexpected root %q", update.Version, update.Root)
+		}
+	}
+
+	if update.Delta && len(update.Ops) > 0 {
+		c.clearResumeLocked()
+		c.mu.Unlock()
+		return fmt.Errorf("velox: update carries both delta and operations")
+	}
+	if identityChanged && (update.Delta || len(update.Ops) > 0) {
+		// A new state ID establishes a new epoch. Patches refer to a document
+		// from the old epoch and can appear valid while corrupting it.
+		c.clearResumeLocked()
+		c.mu.Unlock()
+		return fmt.Errorf("velox: new state id %q sent a patch", update.ID)
+	}
+	if update.Delta && update.Version != c.version+1 {
+		c.clearResumeLocked()
+		c.mu.Unlock()
+		return fmt.Errorf("velox: delta skips from version %d to %d", c.version, update.Version)
+	}
+
+	var newState json.RawMessage
+	switch {
+	case len(update.Body) == 0 && len(update.Ops) == 0:
+		// A zero body is Velox's wire representation for a cleared state. Feed
+		// JSON null through the normal struct-clear path below as well; merely
+		// clearing stateMap used to leave the caller's old fields visible.
+		c.stateMap = nil
+		newState = json.RawMessage(`null`)
+	case len(update.Ops) > 0:
+		if firstJSONByte(update.Ops) != '[' || c.stateMap == nil || update.Base != c.root {
+			c.clearResumeLocked()
+			c.mu.Unlock()
+			return fmt.Errorf("velox: operations apply to %q, not the state held", update.Base)
+		}
+		var ops []op
+		if err := json.Unmarshal(update.Ops, &ops); err != nil {
+			c.clearResumeLocked()
+			c.mu.Unlock()
+			return fmt.Errorf("velox: invalid operations: %w", err)
+		}
+		updated, err := applyOps(any(c.stateMap), ops)
+		if err != nil {
+			c.clearResumeLocked()
+			c.mu.Unlock()
+			return fmt.Errorf("velox: state diverged: %w", err)
+		}
+		var ok bool
+		if c.stateMap, ok = updated.(map[string]any); !ok {
+			c.clearResumeLocked()
+			c.mu.Unlock()
+			return fmt.Errorf("velox: operations replaced the root")
+		}
+		newState, err = json.Marshal(c.stateMap)
+		if err != nil {
+			c.clearResumeLocked()
+			c.mu.Unlock()
+			return fmt.Errorf("velox: marshal patched state: %w", err)
+		}
+	case update.Delta:
+		if c.stateMap == nil {
+			c.clearResumeLocked()
+			c.mu.Unlock()
+			return fmt.Errorf("velox: delta has no base state")
+		}
+		var patchMap map[string]any
+		if err := json.Unmarshal(update.Body, &patchMap); err != nil || patchMap == nil {
+			if err == nil {
+				err = errors.New("delta is not an object")
+			}
+			c.clearResumeLocked()
+			c.mu.Unlock()
+			return fmt.Errorf("velox: invalid delta: %w", err)
+		}
+		mergeObjects(c.stateMap, patchMap)
+		var err error
+		newState, err = json.Marshal(c.stateMap)
+		if err != nil {
+			c.clearResumeLocked()
+			c.mu.Unlock()
+			return fmt.Errorf("velox: marshal patched state: %w", err)
+		}
+	default:
+		// A full state must be an object (or null for a clear) so it can serve
+		// as the base for later merge patches. Rejecting another JSON shape keeps
+		// a malformed snapshot from poisoning stateMap while the caller data is
+		// only partially unmarshaled.
+		var stateMap map[string]any
+		if err := json.Unmarshal(update.Body, &stateMap); err != nil {
+			c.clearResumeLocked()
+			c.mu.Unlock()
+			return fmt.Errorf("velox: invalid full state: %w", err)
+		}
+		if stateMap == nil && !isJSONNull(update.Body) {
+			c.clearResumeLocked()
+			c.mu.Unlock()
+			return fmt.Errorf("velox: full state is not an object")
+		}
+		c.stateMap = stateMap
+		newState = update.Body
+	}
+
+	// stateMap is private to this decoder. Release the metadata lock before
+	// acquiring a caller-provided locker: callers commonly read their data and
+	// then ask Version(), and holding the locks in the opposite order deadlocks.
+	newID := c.id
+	if update.ID != "" {
+		newID = update.ID
+	}
+	c.mu.Unlock()
+
+	if c.locker != nil {
+		c.locker.Lock()
+	}
+	clearForUnmarshal(c.data)
+	err := json.Unmarshal(newState, c.data)
+	if err == nil {
+		// Bind all VMap/VSlice fields (nil pusher on client).
+		bindAll(c.data, c.locker, nil)
+	}
+	if c.locker != nil {
+		c.locker.Unlock()
+	}
+	if err != nil {
+		c.mu.Lock()
+		c.clearResumeLocked()
+		c.mu.Unlock()
+		return fmt.Errorf("velox: unmarshal into data: %w", err)
+	}
+
+	c.mu.Lock()
+	c.id = newID
+	c.version = update.Version
+	// Every non-delta update is a v3 operation or a full snapshot, either of
+	// which establishes its target root. A v2 delta deliberately leaves it
+	// alone (normally empty) because the old protocol has no root token.
+	if !update.Delta {
+		c.root = update.Root
+	}
+	c.mu.Unlock()
+
+	if c.OnUpdate != nil {
+		c.OnUpdate()
+	}
+	return nil
+}
+
+// isNoopForHeldRoot recognises the one valid version rollback: a server
+// correcting an implausibly high resume version while confirming that the root
+// the client supplied is already current. Decode Ops rather than comparing
+// bytes so harmless JSON whitespace cannot turn a safe correction into a
+// reconnect loop.
+func isNoopForHeldRoot(update *Update, heldRoot string) bool {
+	if heldRoot == "" || update.Root != heldRoot || update.Base != heldRoot || firstJSONByte(update.Ops) != '[' {
+		return false
+	}
+	var ops []op
+	return json.Unmarshal(update.Ops, &ops) == nil && len(ops) == 0
+}
+
+// clearResumeLocked forgets all protocol state after a failed update. The
+// caller must hold c.mu. In particular ID must go too: the next request must
+// be indistinguishable from a fresh client so an older v2 peer sends a full
+// snapshot instead of deciding its version is current.
+func (c *Client[T]) clearResumeLocked() {
+	c.stateMap = nil
+	c.id = ""
+	c.version = 0
+	c.root = ""
 }
 
 // clearForUnmarshal zeros all JSON-serializable fields in a struct before

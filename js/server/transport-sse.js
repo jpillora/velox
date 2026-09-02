@@ -31,15 +31,18 @@ module.exports = class EventSourceTransport {
   }
 
   writeAs(event, data) {
-    return new Promise((resolve, _) => {
+    return new Promise((resolve, reject) => {
       //attempt write
-      console.log("writing", event, data);
       this.s.write(
         {
           id: ++this.eventId,
           data: data,
         },
-        () => {
+        err => {
+          if (err) {
+            reject(err);
+            return;
+          }
           //written!
           if (this.res.get("Content-Encoding")) {
             this.flush();

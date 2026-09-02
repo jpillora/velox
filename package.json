@@ -17,7 +17,7 @@
   "homepage": "https://github.com/jpillora/velox#readme",
   "scripts": {
     "build": "esbuild js/client/entry-browser.js --bundle --minify --sourcemap --target=chrome58,firefox57,safari11,edge16 > js/build/bundle.js",
-    "test": "node js/test/ops.test.js && node js/test/merkle.test.js && node js/test/client.test.js"
+    "test": "node js/test/ops.test.js && node js/test/merkle.test.js && node js/test/client.test.js && node js/test/server-protocol.test.js"
   },
   "devDependencies": {
     "esbuild": "^0.25.3",

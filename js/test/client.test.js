@@ -180,6 +180,88 @@ v2.disconnect();
   console.log("  ok   rejects a delete against an array index");
 }
 
+// Snapshot merging and v3 paths must never follow JavaScript's inherited
+// __proto__/constructor properties. A server is normally trusted, but an
+// injected/replayed stream must not be able to pollute every object in the
+// page or overwrite caller-owned $ fields.
+{
+  const applyOps = require("../client/ops");
+  const merge = require("../client/merge");
+  const doc = {$local: "mine"};
+  const snapshot = JSON.parse('{"__proto__":{"polluted":true},"constructor":{"prototype":{"polluted":true}},"$local":"remote"}');
+  merge(doc, snapshot);
+  assert.strictEqual({}.polluted, undefined, "snapshot polluted Object.prototype");
+  assert.strictEqual(doc.$local, "mine", "snapshot overwrote a caller-owned $ key");
+  assert.ok(Object.prototype.hasOwnProperty.call(doc, "__proto__"), "__proto__ was not kept as data");
+  assert.throws(
+    () => applyOps({}, [["s", ["constructor", "prototype", "polluted"], true]]),
+    /path escapes/,
+    "operation traversed inherited constructor"
+  );
+  applyOps(doc, [
+    ["s", ["$local"], "remote"],
+    ["d", ["$local"]],
+    ["s", ["$nested", "value"], "remote"]
+  ]);
+  assert.strictEqual(doc.$local, "mine", "operation overwrote a caller-owned $ key");
+  assert.strictEqual(doc.$nested, undefined, "operation created a caller-owned $ key");
+  applyOps(doc, [["s", ["__proto__", "safe"], 1]]);
+  assert.strictEqual(doc.__proto__.safe, 1, "own __proto__ data could not be updated safely");
+  assert.strictEqual({}.safe, undefined, "operation polluted Object.prototype");
+  assert.throws(
+    () => applyOps(doc, [["s", ["missing"]]]),
+    /invalid set/,
+    "truncated set operation was accepted"
+  );
+  console.log("  ok   confines hostile keys and ignores caller-owned $ properties");
+}
+
+// Version numbers are a monotonic sequence for one state ID. Replayed SSE
+// frames must not roll a client back, and a new ID must reset that sequence so
+// its initial snapshot is accepted even at a lower version.
+{
+  const orderedDoc = {};
+  const ordered = velox.sse(URL, orderedDoc, {retry: false});
+  deliver({id: "ordered-a", version: 1, proto: 3, root: "ordered-root-a", body: {value: 1}});
+  deliver({version: 2, root: "ordered-root-b", base: "ordered-root-a", ops: [["s", ["value"], 2]]});
+  assert.strictEqual(orderedDoc.value, 2);
+  // Both an old snapshot and a duplicate patch are harmlessly ignored.
+  deliver({version: 1, proto: 3, root: "ordered-root-a", body: {value: 999}});
+  deliver({version: 2, root: "ordered-root-b", base: "ordered-root-a", ops: [["s", ["value"], 999]]});
+  assert.strictEqual(orderedDoc.value, 2, "replayed update rolled state back");
+  assert.strictEqual(ordered.version, 2, "replayed update rolled version back");
+  // A current root plus no operations is the one valid backwards version
+  // transition: it repairs a forged/future persisted version without changing
+  // the document.
+  deliver({version: 1, root: "ordered-root-b", base: "ordered-root-b", ops: []});
+  assert.strictEqual(orderedDoc.value, 2, "version correction changed the document");
+  assert.strictEqual(ordered.version, 1, "same-root version correction was ignored");
+  // New identities legitimately start their version sequence again.
+  deliver({id: "ordered-b", version: 1, proto: 3, root: "ordered-root-c", body: {fresh: true}});
+  assert.deepStrictEqual(orderedDoc, {fresh: true});
+  assert.strictEqual(ordered.version, 1);
+  ordered.disconnect();
+  console.log("  ok   rejects stale/replayed frames while accepting a new state identity");
+}
+
+// A Go State may become null. Its SSE representation omits body entirely, so
+// make that clear the client document rather than treating it as malformed or
+// leaving stale fields visible. body:null is the equivalent explicit form.
+{
+  const clearDoc = {$local: "keep"};
+  const clearing = velox.sse(URL, clearDoc, {retry: false});
+  deliver({id: "clear-a", version: 1, proto: 3, root: "clear-root", body: {value: 1}});
+  deliver({version: 2});
+  assert.deepStrictEqual(clearDoc, {$local: "keep"}, "omitted-body clear left synced fields behind");
+  assert.strictEqual(clearing.root, "", "clear retained a resume token");
+  assert.strictEqual(clearing.version, 2, "clear did not advance the version");
+  deliver({id: "clear-b", version: 1, body: {value: 2}});
+  deliver({version: 2, body: null});
+  assert.deepStrictEqual(clearDoc, {$local: "keep"}, "body:null clear left synced fields behind");
+  clearing.disconnect();
+  console.log("  ok   applies explicit and omitted-body state clears");
+}
+
 // A v2 server that predates protocol 3 must still work.
 let legacyDoc = {};
 let v3 = velox.sse(URL, legacyDoc, {retry: false});

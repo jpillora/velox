@@ -5,6 +5,24 @@ import (
 	"time"
 )
 
+// A resume token is the hex encoding of mnode.hash. Keep this check next to
+// rootHash so every protocol boundary agrees on the token's exact shape. In
+// particular, never let an arbitrary query string become a patch-cache key.
+const rootHashLen = 32
+
+func validRootHash(hash string) bool {
+	if len(hash) != rootHashLen {
+		return false
+	}
+	for i := 0; i < len(hash); i++ {
+		c := hash[i]
+		if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 var (
 	// DefaultHistoryWindow is how far back a client may resume from. It is a
 	// duration rather than a version count because the useful bound is

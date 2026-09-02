@@ -53,6 +53,15 @@ type State struct {
 	//HistoryMaxNodes caps the merkle nodes the resume history retains.
 	//Defaults to DefaultHistoryMaxNodes.
 	HistoryMaxNodes int `json:"-"`
+	//MaxWebSocketMessageSize is the largest inbound WebSocket data message the
+	//server accepts. Velox clients only send a small keepalive, so the default
+	//is deliberately small; raise it only when an application has an explicit
+	//inbound WebSocket protocol of its own.
+	MaxWebSocketMessageSize int64 `json:"-"`
+	//CheckOrigin optionally controls which browser origins may open a WebSocket
+	//sync connection. Nil uses gorilla/websocket's safe same-origin default.
+	//Set it only when cross-origin WebSocket access is intentionally allowed.
+	CheckOrigin func(*http.Request) bool `json:"-"`
 	//Incremental lets VMap/VSlice containers reuse their previous encoding when
 	//nothing in them changed, so a push re-encodes only the parts of the state
 	//that moved. It engages only for containers whose element type is safe to
@@ -84,7 +93,7 @@ type State struct {
 	// markDataOwned), whose buffers are fresh per call and safe to keep.
 	dataOwned    bool
 	ownedDataPtr uintptr
-	data             struct {
+	data         struct {
 		mut      sync.RWMutex
 		id       string //data id != conn id
 		bytes    []byte
@@ -133,6 +142,9 @@ func (s *State) init() error {
 	}
 	if s.PingInterval == 0 {
 		s.PingInterval = DefaultPingInterval
+	}
+	if s.MaxWebSocketMessageSize <= 0 {
+		s.MaxWebSocketMessageSize = DefaultMaxWebSocketMessageSize
 	}
 	s.data.patcher.leafSize = s.MerkleLeafSize
 	s.data.history = newVersionHistory(s.HistoryWindow, s.HistoryMaxNodes)
@@ -264,6 +276,12 @@ func (s *State) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &committed) {
 			return
 		}
+		var methodErr *methodNotAllowedError
+		if errors.As(err, &methodErr) {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, methodErr.Error(), http.StatusMethodNotAllowed)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -279,9 +297,18 @@ type responseCommittedError struct {
 func (e *responseCommittedError) Error() string { return e.err.Error() }
 func (e *responseCommittedError) Unwrap() error { return e.err }
 
+// methodNotAllowedError lets ServeHTTP preserve HTTP method semantics while
+// callers of Handle still receive a regular error.
+type methodNotAllowedError struct{}
+
+func (*methodNotAllowedError) Error() string { return "sync requires GET" }
+
 func (state *State) Handle(w http.ResponseWriter, r *http.Request) (Conn, error) {
 	if err := state.init(); err != nil {
 		return nil, fmt.Errorf("init: %w", err)
+	}
+	if r.Method != http.MethodGet {
+		return nil, &methodNotAllowedError{}
 	}
 	query := r.URL.Query()
 	version := int64(0)
@@ -293,7 +320,9 @@ func (state *State) Handle(w http.ResponseWriter, r *http.Request) (Conn, error)
 		if v, err := strconv.ParseInt(query.Get("v"), 10, 64); err == nil && v > 0 {
 			version = v
 		}
-		baseHash = query.Get("h")
+		if hash := query.Get("h"); validRootHash(hash) {
+			baseHash = hash
+		}
 	}
 	//protocol negotiation: absent or older than 3 is served v2 unchanged
 	proto := 0
@@ -671,7 +700,14 @@ func (s *State) discardPatchCache() {
 // It reports false when the base is unknown — the client is beyond the history
 // window, or the server restarted — leaving the caller to send a full snapshot.
 func (s *State) opsFor(baseHash string) (json.RawMessage, bool) {
-	if baseHash == "" || s.data.root == nil || baseHash == s.data.rootHash {
+	if !validRootHash(baseHash) || s.data.root == nil || baseHash == s.data.rootHash {
+		return nil, false
+	}
+	// Do the authoritative history lookup before touching patchCache. Clients
+	// send this value in a query parameter; caching misses gave every random
+	// token a permanent map entry until the next publish.
+	base, ok := s.data.history.find(baseHash)
+	if !ok {
 		return nil, false
 	}
 	s.data.patchMut.Lock()
@@ -682,21 +718,17 @@ func (s *State) opsFor(baseHash string) (json.RawMessage, bool) {
 	if s.data.patchCache == nil {
 		s.data.patchCache = map[string]json.RawMessage{}
 	}
-	payload, err := s.buildOps(baseHash)
+	payload, err := s.buildOps(base)
 	if err != nil && s.Debug {
 		log.Printf("velox: v3 diff from %s failed: %s", baseHash, err)
 	}
-	// A miss is memoised as nil so a client stuck on an evicted base is not
-	// re-diffed on every push.
+	// Only retained bases reach this point, so every cache entry is bounded by
+	// the configured history rather than by attacker-controlled query strings.
 	s.data.patchCache[baseHash] = payload
 	return payload, payload != nil
 }
 
-func (s *State) buildOps(baseHash string) (json.RawMessage, error) {
-	base, ok := s.data.history.find(baseHash)
-	if !ok {
-		return nil, nil
-	}
+func (s *State) buildOps(base *mnode) (json.RawMessage, error) {
 	ops, err := diffTrees(base, s.data.root, true)
 	if err != nil {
 		return nil, err
