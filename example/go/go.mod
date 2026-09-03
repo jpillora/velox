@@ -6,7 +6,7 @@ replace github.com/jpillora/velox => ../..
 
 require (
 	github.com/jpillora/sizestr v1.0.0
-	github.com/jpillora/velox v0.11.0
+	github.com/jpillora/velox v0.11.1
 	google.golang.org/grpc v1.83.2
 )
 
