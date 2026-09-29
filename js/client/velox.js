@@ -2,6 +2,7 @@ const jsonpatch = require("json-merge-patch");
 const merge = require("./merge");
 const applyOps = require("./ops");
 const createStore = require("./storage");
+const selection = require("./selective-path");
 const parseUrl = require("url-parse");
 const Backoff = require("backo");
 
@@ -29,6 +30,7 @@ if (!root) {
 }
 
 function clearSyncedProperties(obj) {
+  if (Array.isArray(obj)) obj.length = 0;
   // A null State is represented by an empty update on the Go wire. Keep
   // application-owned $ fields just as resync() does, but remove every field
   // that could have come from the synchronised document.
@@ -60,6 +62,10 @@ class Velox {
     }
     this.obj = obj;
     this.opts = opts || {};
+    this.path = this.opts.path || "";
+    this.paths = selection.normalizePaths(this.opts.paths || []).paths;
+    if (this.path && this.paths.length) throw new Error("velox: set path or paths, not both");
+    if (this.path) selection.parsePath(this.path);
     this.backoff = new Backoff(this.opts.backoff || { min: 100, max: 20000 });
     if (this.opts.retry === undefined) {
       this.opts.retry = true;
@@ -125,6 +131,8 @@ class Velox {
     let u = parseUrl(url, true);
     //add query params
     u.query.p = PROTO;
+    if (this.path) u.query.path = this.path;
+    if (this.paths.length) u.query.paths = JSON.stringify(this.paths);
     if (this.version) {
       u.query.v = this.version;
     }
@@ -235,6 +243,12 @@ class Velox {
       this.pingin();
       return;
     }
+    if ((update.path || "") !== this.path ||
+      JSON.stringify(update.paths || []) !== JSON.stringify(this.paths)) {
+      this.onerror(new Error("velox: server did not acknowledge selective sync paths"));
+      this.disconnect();
+      return;
+    }
 
     const owns = (key) => Object.prototype.hasOwnProperty.call(update, key);
     const hasBody = owns("body");
@@ -274,7 +288,20 @@ class Velox {
         return;
       }
     }
-    if (!isClear && hasBody && (update.body === null || typeof update.body !== "object" || Array.isArray(update.body))) {
+    if ((this.path || this.paths.length) && isClear && (typeof update.root !== "string" || update.root.length === 0)) {
+      fail("velox: invalid selective sync root");
+      return;
+    }
+    if ((this.path || this.paths.length) && hasOps && (update.ops.length !== 0 || update.base !== this.root || update.root !== this.root)) {
+      fail("velox: invalid selective sync operations");
+      return;
+    }
+    if ((this.path || this.paths.length) && update.delta) {
+      fail("velox: selective sync does not accept merge patches");
+      return;
+    }
+    if (!isClear && hasBody && (update.body === null || typeof update.body !== "object" ||
+      ((this.path || this.paths.length) ? Array.isArray(update.body) !== Array.isArray(this.obj) : Array.isArray(update.body)))) {
       fail("velox: full state is not an object");
       return;
     }
@@ -320,7 +347,7 @@ class Velox {
     //perform update
     if (isClear) {
       clearSyncedProperties(this.obj);
-      this.root = "";
+      this.root = (this.path || this.paths.length) ? update.root : "";
       if (this.store) this.store.clear();
     } else if (hasOps) {
       //protocol v3: an ordered operation list against the tree named by base.
@@ -366,6 +393,10 @@ class Velox {
     if (!this.store) return;
     let saved = this.store.load();
     if (!saved) return;
+    if ((saved.path || "") !== this.path || JSON.stringify(saved.paths || []) !== JSON.stringify(this.paths)) {
+      this.store.clear();
+      return;
+    }
     try {
       merge(this.obj, saved.state);
     } catch (err) {
@@ -388,6 +419,8 @@ class Velox {
       id: this.id,
       version: this.version,
       root: this.root,
+      path: this.path,
+      paths: this.paths,
       state: this.obj
     }));
   }

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -26,6 +27,10 @@ const DefaultMaxEventSize = 16 << 20
 // ErrEventTooLarge is returned when a peer sends an SSE event larger than the
 // configured Client.MaxEventSize.
 var ErrEventTooLarge = errors.New("velox: SSE event exceeds configured limit")
+
+// ErrSelectiveUnsupported means the server did not acknowledge a requested
+// selective path. The client stops retrying because reconnecting cannot fix it.
+var ErrSelectiveUnsupported = errors.New("velox: server does not support selective sync")
 
 type eventDecoder interface {
 	Decode(*eventsource.Event) error
@@ -123,10 +128,18 @@ func (d *boundedSSEDecoder) Decode(event *eventsource.Event) error {
 	}
 }
 
-// Client connects to a Velox server and keeps a local struct in sync.
+// Client connects to a Velox server and keeps local data in sync.
 type Client[T any] struct {
 	// URL is the velox sync endpoint URL
 	URL string
+	// Path selects one JSON subtree (for example, machines.local).
+	// An empty Path selects the whole document; a leading $. is optional.
+	// Set before Connect. The server must acknowledge it on every update.
+	Path string
+	// Paths selects several subtrees into a sparse document that preserves
+	// their original locations. An empty list selects the whole document.
+	// Use either Path or Paths, not both; set before Connect.
+	Paths []string
 	// HTTPClient is the HTTP client to use (optional, useful for testing)
 	HTTPClient *http.Client
 
@@ -162,18 +175,19 @@ type Client[T any] struct {
 	done      chan struct{}
 }
 
-// NewClient creates a new Velox client that syncs to the given struct pointer.
-// The data parameter must be a pointer to a struct. If the struct embeds
+// NewClient creates a new Velox client that syncs to the given pointer.
+// data may point to a struct, map, or slice. If a struct embeds
 // sync.Mutex (or implements sync.Locker), it will be locked during updates.
 func NewClient[T any](url string, data *T) (*Client[T], error) {
 	if data == nil {
 		return nil, fmt.Errorf("data must not be nil")
 	}
 
-	// Verify T is a struct type
+	// A selected subtree may be an object or array; an unselected document
+	// remains an object as required by the wire protocol.
 	t := reflect.TypeOf(data).Elem()
-	if t.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("data must be a pointer to a struct, got pointer to %s", t.Kind())
+	if t.Kind() != reflect.Struct && t.Kind() != reflect.Map && t.Kind() != reflect.Slice {
+		return nil, fmt.Errorf("data must be a pointer to a struct, map, or slice, got pointer to %s", t.Kind())
 	}
 
 	c := &Client[T]{
@@ -219,6 +233,17 @@ func (c *Client[T]) Connected() bool {
 // cancelled or an unrecoverable error occurs. If Retry is true (default),
 // it will automatically reconnect on connection failures.
 func (c *Client[T]) Connect(ctx context.Context) error {
+	if c.Path != "" && len(c.Paths) > 0 {
+		return fmt.Errorf("velox: set Path or Paths, not both")
+	}
+	if c.Path != "" {
+		if _, err := parseSyncPath(c.Path); err != nil {
+			return err
+		}
+	}
+	if _, _, err := parseSyncPaths(c.Paths); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	c.mu.Lock()
@@ -257,6 +282,9 @@ func (c *Client[T]) Connect(ctx context.Context) error {
 		err := c.connectOnce(ctx)
 		if err == nil {
 			return nil // clean shutdown
+		}
+		if errors.Is(err, ErrSelectiveUnsupported) {
+			return err
 		}
 
 		// Check if context was cancelled
@@ -315,6 +343,22 @@ func (c *Client[T]) connectOnce(ctx context.Context) error {
 	c.mu.Lock()
 	q := u.Query()
 	q.Set("p", strconv.Itoa(ProtoVersion))
+	if c.Path != "" {
+		if _, err := parseSyncPath(c.Path); err != nil {
+			c.mu.Unlock()
+			return err
+		}
+		q.Set("path", c.Path)
+	}
+	if len(c.Paths) > 0 {
+		ordered, _, err := parseSyncPaths(c.Paths)
+		if err != nil {
+			c.mu.Unlock()
+			return err
+		}
+		encoded, _ := json.Marshal(ordered)
+		q.Set("paths", string(encoded))
+	}
 	if c.version > 0 {
 		q.Set("v", strconv.FormatInt(c.version, 10))
 		if c.id != "" {
@@ -453,6 +497,12 @@ func (c *Client[T]) readEvents(ctx context.Context) error {
 // make it believe the client was current forever.
 func (c *Client[T]) applyUpdate(update *Update) error {
 	c.mu.Lock()
+	requestedPaths, _, pathErr := parseSyncPaths(c.Paths)
+	if pathErr != nil || c.Path != update.Path || !slices.Equal(requestedPaths, update.Paths) {
+		c.clearResumeLocked()
+		c.mu.Unlock()
+		return fmt.Errorf("%w: %q", ErrSelectiveUnsupported, c.Path)
+	}
 	if update.Version <= 0 {
 		c.clearResumeLocked()
 		c.mu.Unlock()
@@ -511,6 +561,32 @@ func (c *Client[T]) applyUpdate(update *Update) error {
 
 	var newState json.RawMessage
 	switch {
+	case c.Path != "" || len(c.Paths) > 0:
+		// Selective streams only contain snapshots of the chosen subtree and
+		// empty operation lists for version advances outside it. There is no
+		// full-document map to retain or patch.
+		if update.Delta || (len(update.Ops) > 0 && len(update.Body) > 0) {
+			c.clearResumeLocked()
+			c.mu.Unlock()
+			return fmt.Errorf("velox: invalid selective sync representation")
+		}
+		if len(update.Ops) > 0 {
+			var ops []op
+			if c.root == "" || c.id == "" || update.Base != c.root || update.Root != c.root || json.Unmarshal(update.Ops, &ops) != nil || len(ops) != 0 {
+				c.clearResumeLocked()
+				c.mu.Unlock()
+				return fmt.Errorf("velox: invalid selective sync operations")
+			}
+			c.version = update.Version
+			c.mu.Unlock()
+			return nil
+		}
+		if len(update.Body) == 0 || update.Root == "" || !json.Valid(update.Body) {
+			c.clearResumeLocked()
+			c.mu.Unlock()
+			return fmt.Errorf("velox: invalid selective sync snapshot")
+		}
+		newState = update.Body
 	case len(update.Body) == 0 && len(update.Ops) == 0:
 		// A zero body is Velox's wire representation for a cleared state. Feed
 		// JSON null through the normal struct-clear path below as well; merely
@@ -696,5 +772,7 @@ func clearForUnmarshalValue(v reflect.Value) {
 			}
 			field.Set(reflect.Zero(ft.Type))
 		}
+	case reflect.Map, reflect.Slice:
+		v.Set(reflect.Zero(v.Type()))
 	}
 }

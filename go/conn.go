@@ -41,7 +41,11 @@ type conn struct {
 	// baseHash is the opaque root the client currently holds. It survives a
 	// reconnect because the client sends it back as the "h" query parameter,
 	// which is what turns a page reload into a patch instead of a snapshot.
-	baseHash string
+	baseHash  string
+	path      string
+	pathParts []any
+	paths     []string
+	pathSets  [][]any
 }
 
 func newConn(id int64, addr string, state *State, version int64, proto int, baseHash string) *conn {
@@ -176,8 +180,32 @@ func (c *conn) Push() {
 	// not would otherwise be judged current on the version alone and left
 	// stranded with nothing sent to it.
 	current := c.Version() == d.version
+	var selected json.RawMessage
+	selectedRoot := ""
+	if c.path != "" || len(c.paths) > 0 {
+		var err error
+		selectionKey := c.path
+		if len(c.paths) > 0 {
+			selected, err = projectSyncBody(d.bytes, c.pathSets)
+			encodedPaths, _ := json.Marshal(c.paths)
+			selectionKey = "paths:" + string(encodedPaths)
+		} else {
+			selected, err = selectSyncBody(d.bytes, c.pathParts)
+		}
+		if err != nil {
+			d.mut.RUnlock()
+			log.Printf("velox: selective sync failed: %s", err)
+			c.Close()
+			return
+		}
+		selectedRoot = selectiveRoot(selectionKey, selected)
+	}
 	if c.proto >= 3 {
-		current = current && c.baseHash == d.rootHash
+		root := d.rootHash
+		if c.path != "" || len(c.paths) > 0 {
+			root = selectedRoot
+		}
+		current = current && c.baseHash == root
 	}
 	if current {
 		d.mut.RUnlock()
@@ -187,6 +215,17 @@ func (c *conn) Push() {
 		return
 	}
 	update := &Update{Version: d.version}
+	if c.path != "" || len(c.paths) > 0 {
+		update.Path = c.path
+		update.Paths = c.paths
+		update.Root = selectedRoot
+		if c.baseHash == selectedRoot && string(selected) != "null" {
+			update.Base = c.baseHash
+			update.Ops = json.RawMessage(`[]`)
+		} else {
+			update.Body = selected
+		}
+	}
 	//first push? include id
 	if atomic.CompareAndSwapUint32(&c.first, 0, 1) {
 		update.ID = d.id
@@ -195,7 +234,10 @@ func (c *conn) Push() {
 		}
 	}
 	//choose optimal update (send the smallest)
-	if c.proto >= 3 {
+	if c.path != "" || len(c.paths) > 0 {
+		// A selective connection only sends the selected object. Its root is
+		// scoped to the path, so full-document operations cannot apply to it.
+	} else if c.proto >= 3 {
 		update.Root = d.rootHash
 		//under v3 the root hash, not the version, says where a client is. A state
 		//that changes and changes back returns to a root some client already

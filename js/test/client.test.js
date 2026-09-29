@@ -271,5 +271,52 @@ assert.deepStrictEqual(legacyDoc, {a: 9, b: 2});
 console.log("  ok   still understands a v2 server");
 v3.disconnect();
 
+// A selective client receives only the chosen array and rejects a server that
+// ignores the path request. The root remains scoped to that selection.
+{
+  const selected = [];
+  const client = velox.sse(URL, selected, {path: "users[0].items", retry: false});
+  assert.ok(FakeEventSource.last.url.includes("path="));
+  deliver({id: "selection", version: 1, proto: 3, path: "users[0].items",
+    root: "selected-a", body: [1, 2]});
+  assert.deepStrictEqual(selected, [1, 2]);
+  deliver({version: 2, path: "users[0].items", root: "selected-a",
+    base: "selected-a", ops: []});
+  assert.deepStrictEqual(selected, [1, 2]);
+  assert.strictEqual(client.version, 2);
+  deliver({version: 3, path: "users[0].items", root: "selected-b", body: [3]});
+  assert.deepStrictEqual(selected, [3]);
+  deliver({version: 4, path: "users[0].items", root: "selected-null", body: null});
+  assert.deepStrictEqual(selected, []);
+  assert.strictEqual(client.root, "selected-null");
+  deliver({version: 5, root: "wrong", body: [9]});
+  assert.deepStrictEqual(selected, []);
+  assert.strictEqual(client.version, 4);
+  assert.strictEqual(client.retrying, false);
+  client.disconnect();
+  console.log("  ok   selective sync keeps only the selected array and checks path acknowledgement");
+}
+
+// Multiple paths preserve their positions in a sparse local document.
+{
+  const local = {};
+  const client = velox.sse(URL, local, {paths: ["settings.theme", "machines.local"], retry: false});
+  assert.ok(FakeEventSource.last.url.includes("paths="));
+  deliver({id: "multi", version: 1, proto: 3, paths: ["machines.local", "settings.theme"],
+    root: "multi-a", body: {machines: {local: {name: "laptop"}}, settings: {theme: "dark"}}});
+  assert.deepStrictEqual(local, {machines: {local: {name: "laptop"}}, settings: {theme: "dark"}});
+  deliver({version: 2, paths: ["machines.local", "settings.theme"],
+    root: "multi-a", base: "multi-a", ops: []});
+  assert.strictEqual(client.version, 2);
+  deliver({version: 3, paths: ["machines.local", "settings.theme"],
+    root: "multi-b", body: {settings: {theme: "light"}}});
+  assert.deepStrictEqual(local, {settings: {theme: "light"}});
+  deliver({version: 4, path: "machines.local", root: "wrong", body: {name: "wrong"}});
+  assert.deepStrictEqual(local, {settings: {theme: "light"}});
+  assert.strictEqual(client.retrying, false);
+  client.disconnect();
+  console.log("  ok   syncs multiple paths as a sparse document");
+}
+
 console.log("\nall client cases passed");
 process.exit(0);

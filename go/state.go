@@ -282,6 +282,11 @@ func (s *State) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, methodErr.Error(), http.StatusMethodNotAllowed)
 			return
 		}
+		var pathErr *invalidPathError
+		if errors.As(err, &pathErr) {
+			http.Error(w, pathErr.Error(), http.StatusBadRequest)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -302,6 +307,10 @@ func (e *responseCommittedError) Unwrap() error { return e.err }
 type methodNotAllowedError struct{}
 
 func (*methodNotAllowedError) Error() string { return "sync requires GET" }
+
+type invalidPathError struct{ err error }
+
+func (e *invalidPathError) Error() string { return e.err.Error() }
 
 func (state *State) Handle(w http.ResponseWriter, r *http.Request) (Conn, error) {
 	if err := state.init(); err != nil {
@@ -329,8 +338,41 @@ func (state *State) Handle(w http.ResponseWriter, r *http.Request) (Conn, error)
 	if p, err := strconv.Atoi(query.Get("p")); err == nil && p > 0 {
 		proto = min(p, ProtoVersion)
 	}
+	path := query.Get("path")
+	var pathParts []any
+	var paths []string
+	var pathSets [][]any
+	if query.Has("paths") {
+		if path != "" || proto < 3 {
+			return nil, &invalidPathError{fmt.Errorf("velox: multiple paths require protocol v3 and no single path")}
+		}
+		var requested []string
+		if err := json.Unmarshal([]byte(query.Get("paths")), &requested); err != nil {
+			return nil, &invalidPathError{fmt.Errorf("velox: invalid paths: %w", err)}
+		}
+		if requested == nil {
+			return nil, &invalidPathError{fmt.Errorf("velox: paths must be a JSON array")}
+		}
+		var err error
+		paths, pathSets, err = parseSyncPaths(requested)
+		if err != nil {
+			return nil, &invalidPathError{err}
+		}
+	}
+	if path != "" {
+		if proto < 3 {
+			return nil, &invalidPathError{fmt.Errorf("velox: selective sync requires protocol v3")}
+		}
+		var err error
+		pathParts, err = parseSyncPath(path)
+		if err != nil {
+			return nil, &invalidPathError{err}
+		}
+	}
 	//set initial connection state
 	conn := newConn(atomic.AddInt64(&connectionID, 1), r.RemoteAddr, state, version, proto, baseHash)
+	conn.path, conn.pathParts = path, pathParts
+	conn.paths, conn.pathSets = paths, pathSets
 	//attempt connection over transport
 	//(negotiate websockets / start eventsource emitter)
 	//return when connected

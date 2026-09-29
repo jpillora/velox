@@ -21,6 +21,7 @@ Real-time JS object synchronisation over SSE and WebSockets in Go and JavaScript
 - SSE [client-side poly-fill](https://github.com/remy/polyfills/blob/master/EventSource.js) to fallback to long-polling in older browsers (IE8+).
 - Generic `VMap` and `VSlice` containers with automatic locking and push-on-write
 - Go client (`velox.Client[T]`) for server-to-server sync
+- Selective sync of one JSON subtree for clients with limited memory
 
 ### Quick Usage
 
@@ -73,6 +74,62 @@ v.onupdate = function() {
   //foo.A === 42 and foo.B === 21
 };
 ```
+
+### Selective sync
+
+Set a path when connecting to receive just one subtree. The local value is
+the subtree itself, without its ancestors. Both Go and Node servers support
+`name`, `items[0]`, and `["key with spaces"]` (including combinations).
+The `$.` prefix is optional for compatibility; an empty path selects the
+whole document. Wildcards and filters are not supported. A path that does not
+exist clears the local value. Configure the path before connecting and keep it
+fixed for the life of the client.
+
+```go
+type Machine struct {
+	Name string `json:"name"`
+}
+var local Machine
+client, err := velox.NewClient("https://example.com/sync", &local)
+if err != nil { panic(err) }
+client.Path = `machines.local`
+// client.Connect(ctx) now fills local with machines.local only.
+```
+
+```js
+const local = {};
+const client = velox.sse("/sync", local, {path: "machines.local"});
+```
+
+The selected value may be an object or array (use a Go struct, map, or slice
+pointer and a matching JavaScript object or array). The server sends only that
+value on first connect and when it changes; changes elsewhere advance the
+version with an empty update. Selective clients do not retain the full document.
+An older server that ignores `path` is rejected by the client. Selected subtree
+changes currently use snapshots rather than fine-grained operations, so a
+frequently changing large subtree may use more bandwidth than full v3 sync.
+
+For several subtrees, use `Paths` in Go or `paths` in JavaScript. The local
+value keeps their original locations:
+
+```go
+client.Paths = []string{"machines.local", "settings.theme"}
+```
+
+```js
+const local = {};
+velox.sse("/sync", local, {paths: ["machines.local", "settings.theme"]});
+// local: {machines: {local: ...}, settings: {theme: ...}}
+```
+
+Use either `Path` or `Paths`. An empty path list selects the whole document.
+`Paths` preserves hierarchy even when it contains just one path; `Path` returns
+that one subtree directly.
+Missing paths are omitted from the projection; if paths overlap, the parent
+selection includes its entire subtree. Array positions remain at their original
+indices, with `null` placeholders before selected entries. A multi-path request
+can include up to 32 paths, and array indices in those paths are limited to
+65535 to bound the size of sparse arrays.
 
 ### API
 

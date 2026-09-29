@@ -105,6 +105,7 @@ module.exports = function create(opts, url, root) {
     }
   }
   if (!backend) return null;
-  let key = typeof opts.persist === "string" ? opts.persist : "velox:" + url;
+  let key = typeof opts.persist === "string" ? opts.persist : "velox:" + url +
+    (opts.path ? ":" + opts.path : "") + (opts.paths && opts.paths.length ? ":" + JSON.stringify(opts.paths.slice().sort()) : "");
   return new Store(key, backend);
 };

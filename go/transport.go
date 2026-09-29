@@ -24,6 +24,8 @@ type Update struct {
 	Version int64           `json:"version,omitempty"` //53 usable bits
 	Proto   int             `json:"proto,omitempty"`   // v3 only, on the first update
 	Root    string          `json:"root,omitempty"`    // v3 only, opaque resume token
+	Path    string          `json:"path,omitempty"`    // selective sync path acknowledged by server
+	Paths   []string        `json:"paths,omitempty"`   // multiple selected paths, in stable order
 	Base    string          `json:"base,omitempty"`    // v3 only, tree Ops applies to
 	Ops     json.RawMessage `json:"ops,omitempty"`     // v3 only
 	Body    json.RawMessage `json:"body,omitempty"`

@@ -1,5 +1,6 @@
 const EventSourceTransport = require("./transport-sse");
 const WebSocketTransport = require("./transport-ws");
+const selective = require("./selective");
 
 let connectionCount = 0;
 const ROOT_HASH_RE = /^[0-9a-f]{32}$/;
@@ -22,6 +23,8 @@ module.exports = class Connection {
     this.state = state;
     this.pushing = false;
     this.queued = false;
+    this.path = "";
+    this.paths = [];
   }
 
   async setup(req, res) {
@@ -30,17 +33,6 @@ module.exports = class Connection {
     // does not accidentally accept stateful-looking writes.
     if (req.method !== "GET") {
       res.status(405).send("Method Not Allowed");
-      return false;
-    }
-    if (req.headers["accept"] === "text/event-stream") {
-      this.transport = new EventSourceTransport(req, res);
-    } else if (req.headers["upgrade"] === "websocket") {
-      // TODO WEBSOCKETS
-      // this.transport = new WebSocketTransport(req, res);
-      res.status(501).send("WebSockets not implemented yet");
-      return false;
-    } else {
-      res.status(400).send("Invalid sync request");
       return false;
     }
     //optionally set specific version. A mismatched id means a different state
@@ -56,6 +48,38 @@ module.exports = class Connection {
     //protocol negotiation: absent or older than 3 is served v2 unchanged
     if (isSafeNonNegativeInteger(req.query.p) && Number(req.query.p) > 0) {
       this.proto = Math.min(Number(req.query.p), 3);
+    }
+    if (req.query.path !== undefined && req.query.path !== "") {
+      try {
+        if (this.proto < 3) throw new Error("selective sync requires protocol v3");
+        this.pathParts = selective.parsePath(req.query.path);
+        this.path = req.query.path;
+      } catch (err) {
+        res.status(400).send(err.message);
+        return false;
+      }
+    }
+    if (req.query.paths !== undefined) {
+      try {
+        if (this.proto < 3 || this.path) throw new Error("multiple paths require protocol v3 and no single path");
+        const selection = selective.normalizePaths(JSON.parse(req.query.paths));
+        this.paths = selection.paths;
+        this.pathSets = selection.parts;
+      } catch (err) {
+        res.status(400).send(err.message);
+        return false;
+      }
+    }
+    if (req.headers["accept"] === "text/event-stream") {
+      this.transport = new EventSourceTransport(req, res);
+    } else if (req.headers["upgrade"] === "websocket") {
+      // TODO WEBSOCKETS
+      // this.transport = new WebSocketTransport(req, res);
+      res.status(501).send("WebSockets not implemented yet");
+      return false;
+    } else {
+      res.status(400).send("Invalid sync request");
+      return false;
     }
     this.debug("setup", req.query);
     this.connected = true;
@@ -94,6 +118,7 @@ module.exports = class Connection {
   }
 
   async push() {
+    if (this.path || this.paths.length) return this.pushSelected();
     //Version alone is not evidence a v3 client holds this document: an old
     //client, corrupt persistence, or a hostile reconnect can pair a current
     //version with no (or another) root. Send a snapshot in that case.
@@ -138,7 +163,7 @@ module.exports = class Connection {
         };
         payload = JSON.stringify(update).replace(
           /"ops":null\}$/,
-          useOps ? `"ops":${ops}}` : `"body":${this.state.json}}`
+          () => useOps ? `"ops":${ops}}` : `"body":${this.state.json}}`
         );
       } else {
         let delta = undefined;
@@ -161,7 +186,7 @@ module.exports = class Connection {
         let body = delta ? deltaJson : this.state.json;
         payload = JSON.stringify(update).replace(
           /"body":null\}$/,
-          `"body":${body}}`
+          () => `"body":${body}}`
         );
       }
       this.debug("write msg#" + this.writes + " " + payload.length + "bytes");
@@ -191,6 +216,38 @@ module.exports = class Connection {
       } else {
         this.queued = false;
       }
+    }
+  }
+
+  async pushSelected() {
+    if (this.pushing) { this.queued = true; return; }
+    this.pushing = true;
+    let sent = false;
+    try {
+      const version = this.state.version;
+      const many = this.paths.length > 0;
+      const body = many ? selective.projectMany(this.state.json, this.pathSets) :
+        selective.project(this.state.json, this.pathParts);
+      const root = selective.root(many ? "paths:" + JSON.stringify(this.paths) : this.path, body);
+      if (this.version === version && this.baseHash === root) return;
+      const same = this.baseHash === root && body !== "null";
+      const head = {id: this.writes === 0 ? this.state.id : undefined,
+        version, proto: this.writes === 0 ? 3 : undefined,
+        path: this.path || undefined, paths: many ? this.paths : undefined,
+        root, base: same ? this.baseHash : undefined};
+      const payload = same ? JSON.stringify({...head, ops: []}) :
+        JSON.stringify({...head, body: null}).replace(/"body":null\}$/, () => `"body":${body}}`);
+      await this.transport.write(payload);
+      this.writes++;
+      this.version = version;
+      this.baseHash = root;
+      sent = true;
+    } catch (err) {
+      this.debug("selective write failed", err);
+      if (this.transport && typeof this.transport.close === "function") this.transport.close();
+    } finally {
+      this.pushing = false;
+      if (sent && this.queued) { this.queued = false; void this.pushSelected(); }
     }
   }
 
