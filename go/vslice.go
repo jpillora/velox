@@ -5,58 +5,23 @@ import (
 	"reflect"
 	"slices"
 	"sync"
+	"sync/atomic"
 )
 
 // VSlice is a generic slice container that provides automatic locking and push support.
 // Binding to a locker and pusher happens automatically via SyncHandler (server)
 // and Client (after unmarshal).
 type VSlice[V any] struct {
-	locker sync.Locker
-	pusher Pusher
-	data   []V
-	cache  jsonCache // memoised encoding, engaged only when State.Incremental is set
+	binding atomic.Pointer[containerBinding]
+	data    []V
+	cache   jsonCache // memoised encoding, engaged only when State.Incremental is set
 }
 
 func (s *VSlice[V]) bind(locker sync.Locker, pusher Pusher) {
-	s.locker = locker
-	s.pusher = pusher
+	s.binding.Store(&containerBinding{locker: locker, pusher: pusher})
 	s.cache.markDirty()
 	if incrementalRequested(pusher) {
 		s.cache.enable(reflect.TypeFor[V]())
-	}
-}
-
-func (s *VSlice[V]) rlock() {
-	if s.locker == nil {
-		return
-	}
-	if rl, ok := s.locker.(RLocker); ok {
-		rl.RLock()
-	} else {
-		s.locker.Lock()
-	}
-}
-
-func (s *VSlice[V]) runlock() {
-	if s.locker == nil {
-		return
-	}
-	if rl, ok := s.locker.(RLocker); ok {
-		rl.RUnlock()
-	} else {
-		s.locker.Unlock()
-	}
-}
-
-func (s *VSlice[V]) lock() {
-	if s.locker != nil {
-		s.locker.Lock()
-	}
-}
-
-func (s *VSlice[V]) unlock() {
-	if s.locker != nil {
-		s.locker.Unlock()
 	}
 }
 
@@ -65,15 +30,15 @@ func (s *VSlice[V]) unlock() {
 // do it, and it runs even on the client, where there is no pusher.
 func (s *VSlice[V]) push() {
 	s.cache.markDirty()
-	if s.pusher != nil {
-		s.pusher.Push()
+	if binding := s.binding.Load(); binding != nil && binding.pusher != nil {
+		binding.pusher.Push()
 	}
 }
 
 // Get returns a copy of the slice.
 func (s *VSlice[V]) Get() []V {
-	s.rlock()
-	defer s.runlock()
+	unlock := s.binding.Load().rlock()
+	defer unlock()
 	if s.data == nil {
 		return nil
 	}
@@ -84,16 +49,16 @@ func (s *VSlice[V]) Get() []V {
 
 // Len returns the length of the slice.
 func (s *VSlice[V]) Len() int {
-	s.rlock()
-	defer s.runlock()
+	unlock := s.binding.Load().rlock()
+	defer unlock()
 	return len(s.data)
 }
 
 // At returns the element at the given index.
 // Returns zero value and false if index is out of bounds.
 func (s *VSlice[V]) At(index int) (V, bool) {
-	s.rlock()
-	defer s.runlock()
+	unlock := s.binding.Load().rlock()
+	defer unlock()
 	if index < 0 || index >= len(s.data) {
 		var zero V
 		return zero, false
@@ -105,8 +70,8 @@ func (s *VSlice[V]) At(index int) (V, bool) {
 // If the function returns false, iteration stops.
 // Note: The function is called with the lock held.
 func (s *VSlice[V]) Range(fn func(index int, value V) bool) {
-	s.rlock()
-	defer s.runlock()
+	unlock := s.binding.Load().rlock()
+	defer unlock()
 	for i, v := range s.data {
 		if !fn(i, v) {
 			return
@@ -116,16 +81,16 @@ func (s *VSlice[V]) Range(fn func(index int, value V) bool) {
 
 // Set replaces the entire slice and triggers a push.
 func (s *VSlice[V]) Set(data []V) {
-	s.lock()
-	defer s.unlock()
+	unlock := s.binding.Load().lock()
+	defer unlock()
 	s.data = data
 	s.push()
 }
 
 // Append adds values to the end of the slice and triggers a push.
 func (s *VSlice[V]) Append(values ...V) {
-	s.lock()
-	defer s.unlock()
+	unlock := s.binding.Load().lock()
+	defer unlock()
 	s.data = append(s.data, values...)
 	s.push()
 }
@@ -133,8 +98,8 @@ func (s *VSlice[V]) Append(values ...V) {
 // SetAt sets the element at the given index and triggers a push.
 // Returns false if index is out of bounds.
 func (s *VSlice[V]) SetAt(index int, value V) bool {
-	s.lock()
-	defer s.unlock()
+	unlock := s.binding.Load().lock()
+	defer unlock()
 	if index < 0 || index >= len(s.data) {
 		return false
 	}
@@ -146,8 +111,8 @@ func (s *VSlice[V]) SetAt(index int, value V) bool {
 // DeleteAt removes the element at the given index and triggers a push.
 // Returns false if index is out of bounds.
 func (s *VSlice[V]) DeleteAt(index int) bool {
-	s.lock()
-	defer s.unlock()
+	unlock := s.binding.Load().lock()
+	defer unlock()
 	if index < 0 || index >= len(s.data) {
 		return false
 	}
@@ -159,8 +124,8 @@ func (s *VSlice[V]) DeleteAt(index int) bool {
 // Update calls the given function with a pointer to the element at the given index.
 // Returns false if index is out of bounds.
 func (s *VSlice[V]) Update(index int, fn func(*V)) bool {
-	s.lock()
-	defer s.unlock()
+	unlock := s.binding.Load().lock()
+	defer unlock()
 	if index < 0 || index >= len(s.data) {
 		return false
 	}
@@ -172,8 +137,8 @@ func (s *VSlice[V]) Update(index int, fn func(*V)) bool {
 // Batch allows multiple operations on the slice with a single push at the end.
 // The function receives a pointer to the raw slice and can modify it directly.
 func (s *VSlice[V]) Batch(fn func(*[]V)) {
-	s.lock()
-	defer s.unlock()
+	unlock := s.binding.Load().lock()
+	defer unlock()
 	if !s.cache.engaged() {
 		fn(&s.data)
 		s.push()
@@ -193,8 +158,8 @@ func (s *VSlice[V]) Batch(fn func(*[]V)) {
 
 // Clear removes all elements from the slice and triggers a push.
 func (s *VSlice[V]) Clear() {
-	s.lock()
-	defer s.unlock()
+	unlock := s.binding.Load().lock()
+	defer unlock()
 	s.data = nil
 	s.push()
 }
@@ -227,4 +192,10 @@ func (s *VSlice[V]) UnmarshalJSON(data []byte) error {
 	s.data = nil
 	s.cache.markDirty()
 	return json.Unmarshal(data, &s.data)
+}
+
+// clearForUnmarshal preserves the binding while the parent holds its write lock.
+func (s *VSlice[V]) clearForUnmarshal() {
+	s.data = nil
+	s.cache.markDirty()
 }

@@ -205,6 +205,14 @@ func NewClient[T any](url string, data *T) (*Client[T], error) {
 		c.locker = l
 	}
 
+	if c.locker != nil {
+		c.locker.Lock()
+	}
+	bindAll(c.data, c.locker, nil)
+	if c.locker != nil {
+		c.locker.Unlock()
+	}
+
 	return c, nil
 }
 
@@ -739,8 +747,8 @@ func (c *Client[T]) clearResumeLocked() {
 // unmarshaling the complete stateMap. Since the stateMap always represents the
 // full state, json.Unmarshal will re-populate all fields that should have values.
 // Fields tagged with json:"-" are preserved (e.g., sync.Locker, internal state).
-// Anonymous (embedded) structs are recursed into rather than zeroed wholesale,
-// so their json:"-" fields are also preserved.
+// Struct fields are recursed into so container bindings and json:"-" fields
+// survive the reset. Custom JSON types retain their zero-before-unmarshal behavior.
 func clearForUnmarshal(v any) {
 	clearForUnmarshalValue(reflect.ValueOf(v))
 }
@@ -748,6 +756,12 @@ func clearForUnmarshal(v any) {
 func clearForUnmarshalValue(v reflect.Value) {
 	if !v.IsValid() {
 		return
+	}
+	if v.CanAddr() && v.Addr().CanInterface() {
+		if container, ok := v.Addr().Interface().(interface{ clearForUnmarshal() }); ok {
+			container.clearForUnmarshal()
+			return
+		}
 	}
 	switch v.Kind() {
 	case reflect.Ptr:
@@ -766,7 +780,17 @@ func clearForUnmarshalValue(v reflect.Value) {
 			if tag == "-" {
 				continue
 			}
-			if ft.Anonymous && field.Kind() == reflect.Struct {
+			if field.CanAddr() && field.Addr().CanInterface() {
+				if container, ok := field.Addr().Interface().(interface{ clearForUnmarshal() }); ok {
+					container.clearForUnmarshal()
+					continue
+				}
+			}
+			if field.Kind() == reflect.Struct {
+				if _, custom := field.Addr().Interface().(json.Unmarshaler); !ft.Anonymous && custom {
+					field.Set(reflect.Zero(ft.Type))
+					continue
+				}
 				clearForUnmarshalValue(field)
 				continue
 			}

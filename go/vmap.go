@@ -5,21 +5,20 @@ import (
 	"maps"
 	"reflect"
 	"sync"
+	"sync/atomic"
 )
 
 // VMap is a generic map container that provides automatic locking and push support.
 // Binding to a locker and pusher happens automatically via SyncHandler (server)
 // and Client (after unmarshal).
 type VMap[K comparable, V any] struct {
-	locker sync.Locker // may also implement RLocker
-	pusher Pusher      // nil on client (no push)
-	data   map[K]V
-	cache  jsonCache // memoised encoding, engaged only when State.Incremental is set
+	binding atomic.Pointer[containerBinding]
+	data    map[K]V
+	cache   jsonCache // memoised encoding, engaged only when State.Incremental is set
 }
 
 func (m *VMap[K, V]) bind(locker sync.Locker, pusher Pusher) {
-	m.locker = locker
-	m.pusher = pusher
+	m.binding.Store(&containerBinding{locker: locker, pusher: pusher})
 	if m.data == nil {
 		m.data = make(map[K]V)
 	}
@@ -29,70 +28,35 @@ func (m *VMap[K, V]) bind(locker sync.Locker, pusher Pusher) {
 	}
 }
 
-// rlock acquires read lock (RLock if available, else Lock)
-func (m *VMap[K, V]) rlock() {
-	if m.locker == nil {
-		return
-	}
-	if rl, ok := m.locker.(RLocker); ok {
-		rl.RLock()
-	} else {
-		m.locker.Lock()
-	}
-}
-
-func (m *VMap[K, V]) runlock() {
-	if m.locker == nil {
-		return
-	}
-	if rl, ok := m.locker.(RLocker); ok {
-		rl.RUnlock()
-	} else {
-		m.locker.Unlock()
-	}
-}
-
-func (m *VMap[K, V]) lock() {
-	if m.locker != nil {
-		m.locker.Lock()
-	}
-}
-
-func (m *VMap[K, V]) unlock() {
-	if m.locker != nil {
-		m.locker.Unlock()
-	}
-}
-
 // push notifies the state that this container changed. Marking the cache dirty
 // here rather than in each mutator means a mutator added later cannot forget to
 // do it, and it runs even on the client, where there is no pusher.
 func (m *VMap[K, V]) push() {
 	m.cache.markDirty()
-	if m.pusher != nil {
-		m.pusher.Push()
+	if binding := m.binding.Load(); binding != nil && binding.pusher != nil {
+		binding.pusher.Push()
 	}
 }
 
 // Get returns the value for the given key and whether it exists.
 func (m *VMap[K, V]) Get(key K) (V, bool) {
-	m.rlock()
-	defer m.runlock()
+	unlock := m.binding.Load().rlock()
+	defer unlock()
 	v, ok := m.data[key]
 	return v, ok
 }
 
 // Len returns the number of entries in the map.
 func (m *VMap[K, V]) Len() int {
-	m.rlock()
-	defer m.runlock()
+	unlock := m.binding.Load().rlock()
+	defer unlock()
 	return len(m.data)
 }
 
 // Keys returns a slice of all keys in the map.
 func (m *VMap[K, V]) Keys() []K {
-	m.rlock()
-	defer m.runlock()
+	unlock := m.binding.Load().rlock()
+	defer unlock()
 	keys := make([]K, 0, len(m.data))
 	for k := range m.data {
 		keys = append(keys, k)
@@ -102,8 +66,8 @@ func (m *VMap[K, V]) Keys() []K {
 
 // Values returns a slice of all values in the map.
 func (m *VMap[K, V]) Values() []V {
-	m.rlock()
-	defer m.runlock()
+	unlock := m.binding.Load().rlock()
+	defer unlock()
 	values := make([]V, 0, len(m.data))
 	for _, v := range m.data {
 		values = append(values, v)
@@ -113,8 +77,8 @@ func (m *VMap[K, V]) Values() []V {
 
 // Snapshot returns a copy of the underlying map.
 func (m *VMap[K, V]) Snapshot() map[K]V {
-	m.rlock()
-	defer m.runlock()
+	unlock := m.binding.Load().rlock()
+	defer unlock()
 	cp := make(map[K]V, len(m.data))
 	for k, v := range m.data {
 		cp[k] = v
@@ -124,8 +88,8 @@ func (m *VMap[K, V]) Snapshot() map[K]V {
 
 // Has returns true if the key exists in the map.
 func (m *VMap[K, V]) Has(key K) bool {
-	m.rlock()
-	defer m.runlock()
+	unlock := m.binding.Load().rlock()
+	defer unlock()
 	_, ok := m.data[key]
 	return ok
 }
@@ -134,8 +98,8 @@ func (m *VMap[K, V]) Has(key K) bool {
 // If the function returns false, iteration stops.
 // Note: The function is called with the lock held.
 func (m *VMap[K, V]) Range(fn func(key K, value V) bool) {
-	m.rlock()
-	defer m.runlock()
+	unlock := m.binding.Load().rlock()
+	defer unlock()
 	for k, v := range m.data {
 		if !fn(k, v) {
 			return
@@ -145,8 +109,8 @@ func (m *VMap[K, V]) Range(fn func(key K, value V) bool) {
 
 // Set sets the value for the given key and triggers a push.
 func (m *VMap[K, V]) Set(key K, value V) {
-	m.lock()
-	defer m.unlock()
+	unlock := m.binding.Load().lock()
+	defer unlock()
 	if m.data == nil {
 		m.data = make(map[K]V)
 	}
@@ -156,8 +120,8 @@ func (m *VMap[K, V]) Set(key K, value V) {
 
 // Delete removes the key from the map and triggers a push.
 func (m *VMap[K, V]) Delete(key K) {
-	m.lock()
-	defer m.unlock()
+	unlock := m.binding.Load().lock()
+	defer unlock()
 	delete(m.data, key)
 	m.push()
 }
@@ -166,8 +130,8 @@ func (m *VMap[K, V]) Delete(key K) {
 // If the key exists, the function is called and a push is triggered.
 // Returns true if the key existed and was updated.
 func (m *VMap[K, V]) Update(key K, fn func(*V)) bool {
-	m.lock()
-	defer m.unlock()
+	unlock := m.binding.Load().lock()
+	defer unlock()
 	v, ok := m.data[key]
 	if !ok {
 		return false
@@ -181,8 +145,8 @@ func (m *VMap[K, V]) Update(key K, fn func(*V)) bool {
 // Batch allows multiple operations on the map with a single push at the end.
 // The function receives the raw map and can modify it directly.
 func (m *VMap[K, V]) Batch(fn func(data map[K]V)) {
-	m.lock()
-	defer m.unlock()
+	unlock := m.binding.Load().lock()
+	defer unlock()
 	if m.data == nil {
 		m.data = make(map[K]V)
 	}
@@ -202,8 +166,8 @@ func (m *VMap[K, V]) Batch(fn func(data map[K]V)) {
 
 // Clear removes all entries from the map and triggers a push.
 func (m *VMap[K, V]) Clear() {
-	m.lock()
-	defer m.unlock()
+	unlock := m.binding.Load().lock()
+	defer unlock()
 	m.data = make(map[K]V)
 	m.push()
 }
@@ -236,4 +200,10 @@ func (m *VMap[K, V]) UnmarshalJSON(data []byte) error {
 	m.data = make(map[K]V) // Clear to handle deletions
 	m.cache.markDirty()
 	return json.Unmarshal(data, &m.data)
+}
+
+// clearForUnmarshal preserves the binding while the parent holds its write lock.
+func (m *VMap[K, V]) clearForUnmarshal() {
+	m.data = nil
+	m.cache.markDirty()
 }
