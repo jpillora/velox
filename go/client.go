@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -404,7 +405,9 @@ func (c *Client[T]) connectOnce(ctx context.Context) error {
 		resp.Body.Close()
 		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
 	}
-	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+	ct := resp.Header.Get("Content-Type")
+	mediaType, _, err := mime.ParseMediaType(ct)
+	if err != nil || mediaType != "text/event-stream" {
 		resp.Body.Close()
 		return fmt.Errorf("unexpected content-type: %s", ct)
 	}

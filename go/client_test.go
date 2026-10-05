@@ -2,11 +2,13 @@ package velox_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +17,110 @@ import (
 	velox "github.com/jpillora/velox/go"
 	"google.golang.org/grpc/test/bufconn"
 )
+
+func TestClientContentType(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		accepted    bool
+	}{
+		{"bare", "text/event-stream", true},
+		{"charset", "text/event-stream; charset=utf-8", true},
+		{"quoted charset", `text/event-stream; charset="UTF-8"`, true},
+		{"mixed case", "Text/Event-Stream", true},
+		{"mixed case with parameter", "TEXT/EVENT-STREAM; Charset=UTF-8", true},
+		{"whitespace", " text/event-stream ; charset=utf-8 ", true},
+		{"multiple parameters", `text/event-stream; charset=utf-8; boundary="a;b"`, true},
+		{"missing", "", false},
+		{"plain text", "text/plain", false},
+		{"json", "application/json", false},
+		{"subtype suffix", "text/event-stream-extra", false},
+		{"missing subtype", "text/", false},
+		{"invalid parameter", "text/event-stream; charset", false},
+		{"unterminated parameter", `text/event-stream; charset="utf-8`, false},
+	}
+	for _, tt := range tests {
+		for _, compressed := range []bool{false, true} {
+			name := tt.name
+			if compressed {
+				name += "/gzip"
+			}
+			t.Run(name, func(t *testing.T) {
+				payload := []byte("data: {\"id\":\"server-one\",\"version\":1,\"body\":{\"count\":42}}\n\n")
+				if compressed {
+					var buf bytes.Buffer
+					gz := gzip.NewWriter(&buf)
+					if _, err := gz.Write(payload); err != nil {
+						t.Fatal(err)
+					}
+					if err := gz.Flush(); err != nil {
+						t.Fatal(err)
+					}
+					// A live gzip stream has no footer until the connection ends.
+					payload = buf.Bytes()
+					if err := gz.Close(); err != nil {
+						t.Fatal(err)
+					}
+				}
+				handlerDone := make(chan struct{})
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					defer close(handlerDone)
+					if tt.contentType == "" {
+						w.Header()["Content-Type"] = nil
+					} else {
+						w.Header().Set("Content-Type", tt.contentType)
+					}
+					if compressed {
+						w.Header().Set("Content-Encoding", "gzip")
+					}
+					if _, err := w.Write(payload); err != nil {
+						t.Error(err)
+						return
+					}
+					w.(http.Flusher).Flush()
+					<-r.Context().Done()
+				}))
+				defer server.Close()
+
+				data := &struct {
+					Count int `json:"count"`
+				}{}
+				client, err := velox.NewClient(server.URL, data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				client.HTTPClient = server.Client()
+				client.Retry = false
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				connected := false
+				client.OnConnect = func() { connected = true }
+				client.OnUpdate = cancel
+				err = client.Connect(ctx)
+				if tt.accepted {
+					if err != nil {
+						t.Errorf("Connect returned %v after update", err)
+					}
+					if !connected || data.Count != 42 || client.Version() != 1 {
+						t.Errorf("connected=%v, count=%d, version=%d, expected true, 42, 1", connected, data.Count, client.Version())
+					}
+				} else {
+					if err == nil || !strings.HasPrefix(err.Error(), "unexpected content-type: ") {
+						t.Errorf("Connect returned %v, expected content type rejection", err)
+					}
+					if connected || data.Count != 0 || client.Version() != 0 {
+						t.Errorf("rejected response connected=%v, count=%d, version=%d", connected, data.Count, client.Version())
+					}
+				}
+				select {
+				case <-handlerDone:
+				case <-time.After(time.Second):
+					t.Error("response body was not closed")
+				}
+			})
+		}
+	}
+}
 
 // bufconnClient creates an http.Client that dials through a bufconn listener
 func bufconnClient(l *bufconn.Listener) *http.Client {
